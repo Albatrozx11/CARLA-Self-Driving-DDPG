@@ -22,6 +22,7 @@ class CarlaEnv:
         print("Connecting to CARLA (127.0.0.1)...")
         self.client = carla.Client(Config.SIMULATOR_HOST, Config.SIMULATOR_PORT)
         self.client.set_timeout(Config.TIMEOUT)
+        
         self.world = self.client.get_world()
 
         # --- NEW: OPTIMIZATION SETTINGS ---
@@ -52,6 +53,17 @@ class CarlaEnv:
             'collision': [],
             'lane_invasion': []
         }
+        
+        self.stats = {
+            "step_count": 0,
+            "total_reward": 0,
+            "max_speed": 0,
+            "lane_invasions": 0,
+            "collision_count": 0,
+            "total_progress_reward": 0, # How much it earned for moving toward goal
+            "total_jerk_penalty": 0,     # How much it was punished for shaky steering
+            "distance_to_goal": 0        # Final distance when episode ended
+        }
 
     def reset(self):
         self.destroy_agents()
@@ -65,6 +77,17 @@ class CarlaEnv:
             'lane_invasion': []
         }
         self.last_steer = 0.0
+        
+        self.stats = {
+            "step_count": 0,
+            "total_reward": 0,
+            "max_speed": 0,
+            "lane_invasions": 0,
+            "collision_count": 0,
+            "total_progress_reward": 0, # How much it earned for moving toward goal
+            "total_jerk_penalty": 0,     # How much it was punished for shaky steering
+            "distance_to_goal": 0        # Final distance when episode ended
+        }
         
         # 1. Randomize Weather (Visual Irregularities)
         # Allows AI to generalize across Sunny, Rainy, Foggy, and Night conditions
@@ -396,21 +419,26 @@ class CarlaEnv:
         # 1. Collision (Critical Penalty)
         if len(self.data['collision']) > 0:
             reward += Config.REWARD_COLLISION
+            self.stats["collision_count"] += 1
             done = True
             self.data['collision'] = []
+            
 
         # 2. Lane Invasion (Minor Penalty)
         if len(self.data['lane_invasion']) > 0:
             reward += Config.REWARD_LANE_INVASION
+            self.stats["lane_invasions"] += 1
             self.data['lane_invasion'] = []
 
         # 3. Progress Reward (Speed * Angle Match)
         nav_vector, distance, angle_diff = self._get_navigation()
         norm_speed = nav_vector[2]
-        
         angle_rad = math.radians(angle_diff)
-        progress_reward = norm_speed * math.cos(angle_rad)
-        reward += progress_reward * Config.PROGRESS_REWARD_WEIGHT
+        
+        step_progress = (norm_speed * math.cos(angle_rad)) * Config.PROGRESS_REWARD_WEIGHT
+        reward += step_progress
+        self.stats["total_progress_reward"] += step_progress # TRACK THIS
+        self.stats["distance_to_goal"] = distance # UPDATE FINAL DISTANCE
         
         # 5. GOAL REACHED (New Use for Distance!)
         if distance < 5.0:  # If within 5 meters of target
@@ -423,6 +451,7 @@ class CarlaEnv:
         jerk = abs(steer - self.last_steer)
         if jerk > 0.5:
             reward += Config.REWARD_JERK_PENALTY
+            self.stats["total_jerk_penalty"] += Config.REWARD_JERK_PENALTY
         self.last_steer = steer
 
         return reward, done, nav_vector
@@ -453,17 +482,25 @@ class CarlaEnv:
             self.spectator.set_transform(carla.Transform(smooth_loc, cam_rot))
 
         # --- CONTROL LOGIC ---
-        # steer = float(action[0])
-        # throttle = float(action[1])
-        # brake = float(action[2])
-        #self.vehicle.apply_control(carla.VehicleControl(steer=steer, throttle=throttle, brake=brake))
-        self.vehicle.set_autopilot(True)
+        steer = float(action[0])
+        throttle = float(action[1])
+        brake = float(action[2])
+        self.vehicle.apply_control(carla.VehicleControl(steer=steer, throttle=throttle, brake=brake))
+        #self.vehicle.set_autopilot(True)
         
         self.world.tick()
         
         #Calculate Reward & Done using helper functions
         reward, done, nav_vector = self._calculate_reward(action)
         
+        # UPDATE STATS
+        self.stats["step_count"] += 1
+        self.stats["total_reward"] += reward
+        current_speed = nav_vector[2] * 50 # Convert normalized back to km/h
+        if current_speed > self.stats["max_speed"]:
+            self.stats["max_speed"] = current_speed
+            
+            
         # 2. IMU (6 values: Accel X/Y/Z, Gyro X/Y/Z)
         # If IMU is somehow None (rare), provide zeros
         imu_vector = self.data['imu'] if self.data['imu'] is not None else [0.0]*6
@@ -471,12 +508,27 @@ class CarlaEnv:
         full_vector_state = nav_vector + imu_vector
 
         #RETURN [Camera(Image),Lidar(Image),Physics(Vector)]
-        return [self.data['rgb'],self.data['lidar'],full_vector_state], reward, done, None
+        return [self.data['rgb'],self.data['lidar'],full_vector_state], reward, done, self.stats
 
     def destroy_agents(self):
         print("Cleaning up actors...")
+        
+        if self.world is not None:
+            # 1. Force unfreeze the server
+            settings = self.world.get_settings()
+            settings.synchronous_mode = False # Disable Sync
+            settings.fixed_delta_seconds = None
+            self.world.apply_settings(settings)
+            
+            self.world.wait_for_tick()
+        
+        # 2. Stop and Destroy all actors
         for actor in self.actor_list:
-            if hasattr(actor, 'stop'): actor.stop()
-            if actor.is_alive: actor.destroy()
+            if actor is not None and actor.is_alive:
+                if hasattr(actor, 'stop'): 
+                    actor.stop() # Stop sensor listening
+                actor.destroy()
+                
         self.actor_list = []
+        
         print("Done.")

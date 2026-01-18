@@ -1,37 +1,61 @@
 import cv2
 import time
 from sources import CarlaEnv
+from logger import TrainingLogger  # 1. Import your new logger
+from settings import Config
 
 def main():
-    # 1. Init Environment
     env = CarlaEnv()
+    logger = TrainingLogger()      # 2. Initialize logger
     
     try:
-        # 2. Reset (Spawn car)
-        env.reset()
-        print("Car spawned. ctrl + C to quit")
+        # Loop for multiple episodes
+        for episode in range(1, 1001): 
+            state = env.reset()
+            done = False
+            print(f"Episode {episode} started. Press 'q' to quit.")
 
-        while True:
-            # 3. Define Action: [Steer (0.1=Right), Throttle (0.5=Half), Brake (0.0)]
-            # CHANGE THESE NUMBERS TO CONTROL THE CAR
-            action = [0.0, 0.5, 0.0] 
-            
-            # 4. Step
-            state, reward, done, _ = env.step(action)
+            while not done:
+                # Placeholder action: [Steer, Throttle, Brake]
+                action = [0.0, 0.4, 0.0] 
+                state, reward, done, stats = env.step(action)
 
-            lidar_image = state[1]
-            camera_image = state[0]
-            
-            if camera_image is not None:
-                cv2.imshow("Camera hood view",camera_image)
+                # --- Visualization ---
+                if state[0] is not None:
+                    cv2.imshow("Camera View", state[0])
+                if state[1] is not None:
+                    cv2.imshow("LiDAR View", state[1])
                 
-            if lidar_image is not None:
-                cv2.imshow("LiDAR Top-Down", lidar_image)
-              
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Quitting loop...")
+                    # LOG BEFORE QUITTING
+                    logger.log_episode({
+                        "episode": episode,
+                        "total_reward": round(stats["total_reward"], 2),
+                        "distance_to_goal": 0,
+                        "avg_speed": round(stats["max_speed"] / 2, 2),
+                        "collision_count": stats.get("collision_count", 0),
+                        "lane_invasions": stats["lane_invasions"],
+                        "progress_reward": round(stats["total_progress_reward"], 2),
+                        "jerk_penalty": round(stats["total_jerk_penalty"], 2),
+                        "result": "Manual Quit"
+                    })
+                    return # Exit the entire main function
+                
+            logger.log_episode({
+                "episode": episode,
+                "total_reward": round(stats["total_reward"], 2),
+                "distance_to_goal": round(stats["distance_to_goal"], 2), # Use tracked dist
+                "avg_speed": round(stats["max_speed"] / 2, 2),
+                "collision_count": stats["collision_count"],
+                "lane_invasions": stats["lane_invasions"],
+                "progress_reward": round(stats["total_progress_reward"], 2),
+                "jerk_penalty": round(stats["total_jerk_penalty"], 2),
+                "result": "Success" if stats["distance_to_goal"] < 5.0 else "Crashed/Failed"
+            })
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):        
-                break
 
+            
     finally:
         print("Cleaning up...")
         env.destroy_agents()

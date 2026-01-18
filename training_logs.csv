@@ -1,0 +1,7 @@
+timestamp,episode,total_reward,distance_to_goal,avg_speed,collision_count,lane_invasions,result
+2026-01-18 16:16:38,1,0.0,0,0.0,0,0,Manual Quit
+2026-01-18 16:18:54,3,35.04,0,13.3,0,0,Manual Quit
+2026-01-18 16:34:58,1,-760.64,97.25,15.99,1,10,-560.64,0,Crashed/Failed
+2026-01-18 16:35:22,2,-859.65,217.65,17.02,1,0,-759.65,0,Crashed/Failed
+2026-01-18 16:35:36,3,-47.26,99.6,16.53,1,4,92.74,0,Crashed/Failed
+2026-01-18 16:35:47,4,327.89,0,16.09,0,0,327.89,0,Manual Quit

@@ -7,7 +7,8 @@ class Config:
     TIMEOUT = 10.0
     SYNC_MODE = True
     FIXED_DELTA_SECONDS = 0.05
-    VISUALIZE = True 
+    VISUALIZE = True
+    MAP = "Town02"
     
     # --- ENVIRONMENT NOISE ---
     N_VEHICLES = 15
