@@ -1,24 +1,109 @@
 import cv2
-import time
+import datetime
+import os 
+import numpy as np
 from sources import CarlaEnv
 from logger import TrainingLogger  # 1. Import your new logger
+from model import create_actor, create_critic
+from ddpg_learner import ReplayBuffer, DDPGTrainer, OUNoise 
 from settings import Config
+
+
+import tensorflow as tf
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(e)
 
 def main():
     env = CarlaEnv()
     logger = TrainingLogger()      # 2. Initialize logger
     
+    # Initialize Networks
+    actor = create_actor()
+    critic = create_critic()
+    target_actor = create_actor()
+    target_critic = create_critic()
+
+    # --- NEW: CHECKPOINT LOADER ---
+    actor_path = "echo_drive_actor.h5"
+    critic_path = "echo_drive_critic.h5"
+
+    if os.path.exists(actor_path) and os.path.exists(critic_path):
+        print("Found existing checkpoints! Loading weights...")
+        actor.load_weights(actor_path)
+        critic.load_weights(critic_path)
+        print("Successfully resumed EchoDrive's brain.")
+    else:
+        print("No checkpoints found. Starting fresh from Episode 1.")
+    # ------------------------------
+
+    # Sync target weights initially (MUST happen after loading checkpoints)
+    target_actor.set_weights(actor.get_weights())
+    target_critic.set_weights(critic.get_weights())
+
+    # Initialize Helper Classes
+    buffer = ReplayBuffer(capacity=10000)
+    trainer = DDPGTrainer(actor, critic, target_actor, target_critic)
+    noise_gen = OUNoise(action_dimension=3)
+
+    # Initialize TensorBoard Writer
+    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    train_log_dir = 'logs/echodrive/' + current_time
+    summary_writer = tf.summary.create_file_writer(train_log_dir)
+
+    # --- Epsilon Decay Settings ---
+    epsilon = 1.0          # Start with 100% noise
+    epsilon_decay = 0.995  # Multiply by this after every episode
+    epsilon_min = 0.05     # Never go below 5% noise (keeps a tiny bit of exploration)
     try:
         # Loop for multiple episodes
         for episode in range(1, 1001): 
             state = env.reset()
             done = False
+            noise_gen.reset()
+
+            ep_actor_loss = 0
+            ep_critic_loss = 0
+            training_steps = 0
+
+
             print(f"Episode {episode} started. Press 'q' to quit.")
 
             while not done:
-                # Placeholder action: [Steer, Throttle, Brake]
-                action = [0.0, 0.4, 0.0] 
-                state, reward, done, stats = env.step(action)
+                # 1. Prepare State for Model
+                # state[0] is Camera, state[1] is lidar state[2] is Physics vector
+                cur_state_img = state[0][np.newaxis, ...]
+                cur_lidar = state[1][np.newaxis, ...]
+                cur_state_vec = np.array(state[2])[np.newaxis, ...]
+
+                # 2. Get Action + Decaying Noise
+                mu_action = actor.predict([cur_state_img, cur_lidar, cur_state_vec], verbose=0)[0]
+                noise = noise_gen.noise() * epsilon  # <--- Scale the noise here
+                # Scale throttle/brake (indices 1,2) to be positive 0-1
+                final_action = np.clip(mu_action + noise, [-1.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+
+                # 3. Environment Step
+                next_state, reward, done, stats = env.step(final_action)
+
+                # 4. Store and Train
+                buffer.store(state, final_action, reward, next_state, done)
+
+                if buffer.size > 64:
+                    samples = buffer.sample(batch_size=64)
+                    a_loss, c_loss = trainer.update(*samples)
+                    ep_actor_loss += a_loss
+                    ep_critic_loss += c_loss
+                    training_steps += 1
+
+                state=next_state
+
+                # --- Decay Epsilon ---
+                if epsilon > epsilon_min:
+                    epsilon *= epsilon_decay
 
                 # --- Visualization ---
                 if state[0] is not None:
@@ -41,7 +126,68 @@ def main():
                         "result": "Manual Quit"
                     })
                     return # Exit the entire main function
+                '''
+                # --- Visualization ---         With Q value and Steer
+                if state[0] is not None:
+                    # 1. Ask the Critic how "good" it thinks this current action is
+                    # Note: We pass final_action as a batch of 1: final_action[np.newaxis, ...]
+                    current_q = critic.predict([cur_state_img, cur_lidar, cur_state_vec, final_action[np.newaxis, ...]], verbose=0)[0][0]
+
+                    # 2. Un-normalize and scale up the 80x80 image for human viewing
+                    # Multiply by 255, convert to 8-bit integer, and drop the channel dimension
+                    display_cam = (state[0][:, :, 0] * 255).astype(np.uint8)
+                    
+                    # Convert to BGR so we can draw colored text on it
+                    display_cam = cv2.cvtColor(display_cam, cv2.COLOR_GRAY2BGR)
+                    
+                    # Resize to 400x400 so the text is actually readable
+                    display_cam = cv2.resize(display_cam, (400, 400), interpolation=cv2.INTER_NEAREST)
+
+                    # 3. Draw Telemetry Text
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    
+                    # Q-Value (Yellow)
+                    cv2.putText(display_cam, f"Q-Value: {current_q:.2f}", (10, 30), font, 0.7, (0, 255, 255), 2)
+                    
+                    # Steer (White)
+                    cv2.putText(display_cam, f"Steer: {final_action[0]:.2f}", (10, 60), font, 0.7, (255, 255, 255), 2)
+                    
+                    # Throttle (Green)
+                    cv2.putText(display_cam, f"Gas:   {final_action[1]:.2f}", (10, 90), font, 0.7, (0, 255, 0), 2)
+                    
+                    # Brake (Red)
+                    cv2.putText(display_cam, f"Brake: {final_action[2]:.2f}", (10, 120), font, 0.7, (0, 0, 255), 2)
+
+                    # Show the final overlay
+                    cv2.imshow("EchoDrive Dashcam", display_cam)
+
+                if state[1] is not None:
+                    # Scale up LiDAR as well just to match
+                    display_lidar = (state[1][:, :, 0] * 255).astype(np.uint8)
+                    display_lidar = cv2.resize(display_lidar, (400, 400), interpolation=cv2.INTER_NEAREST)
+                    cv2.imshow("EchoDrive LiDAR", display_lidar)
                 
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Quitting loop...")
+                    # LOG BEFORE QUITTING
+                    logger.log_episode({
+                        "episode": episode,
+                        "total_reward": round(stats["total_reward"], 2),
+                        "distance_to_goal": 0,
+                        "avg_speed": round(stats["max_speed"] / 2, 2),
+                        "collision_count": stats.get("collision_count", 0),
+                        "lane_invasions": stats["lane_invasions"],
+                        "progress_reward": round(stats["total_progress_reward"], 2),
+                        "jerk_penalty": round(stats["total_jerk_penalty"], 2),
+                        "result": "Manual Quit"
+                    })
+                    return # Exit the entire main function
+                '''
+            if episode % 10 == 0:
+                actor.save_weights("echo_drive_actor.h5")
+                critic.save_weights("echo_drive_critic.h5")
+                print("Checkpoint Saved.")
+
             logger.log_episode({
                 "episode": episode,
                 "total_reward": round(stats["total_reward"], 2),
@@ -53,6 +199,19 @@ def main():
                 "jerk_penalty": round(stats["total_jerk_penalty"], 2),
                 "result": "Success" if stats["distance_to_goal"] < 5.0 else "Crashed/Failed"
             })
+            with summary_writer.as_default():
+                tf.summary.scalar('Reward/Total_Reward', stats["total_reward"], step=episode)
+                tf.summary.scalar('Reward/Distance_to_Goal', stats["distance_to_goal"], step=episode)
+                tf.summary.scalar('Metrics/Max_Speed', stats["max_speed"], step=episode)
+                tf.summary.scalar('Metrics/Collisions', stats["collision_count"], step=episode)
+                tf.summary.scalar('Metrics/Epsilon', epsilon, step=episode)
+                
+                # Only log loss if we actually trained this episode
+                if training_steps > 0:
+                    avg_a_loss = ep_actor_loss / training_steps
+                    avg_c_loss = ep_critic_loss / training_steps
+                    tf.summary.scalar('Loss/Actor', avg_a_loss, step=episode)
+                    tf.summary.scalar('Loss/Critic', avg_c_loss, step=episode)
 
 
             
