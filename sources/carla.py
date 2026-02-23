@@ -191,12 +191,13 @@ class CarlaEnv:
         if timeout_counter >= 50:
             print("WARNING: Sensors timed out during spawn. Forcing reset.")
         
-        # GET INITIAL STATE
-        nav, _, _ = self._get_navigation()
+        nav_vector, distance_to_goal, angle_diff = self._get_navigation()
+        self.last_distance = distance_to_goal  # <--- ADD THIS
+        
         imu = self.data['imu'] if self.data['imu'] else [0.0]*6
         
-        # RETURN THE STATE (Not None)
-        return [self.data['rgb'], self.data['lidar'], nav + imu]
+        # RETURN THE STATE
+        return [self.data['rgb'], self.data['lidar'], nav_vector + imu]
     
     
     def _spawn_traffic(self, bp_lib, spawn_points):
@@ -381,92 +382,71 @@ class CarlaEnv:
     
     # --- GNSS PROCESSING LOGIC ---
     def _get_navigation(self):
-        if not self.vehicle or not self.destination:
-            return [0.0, 0.0, 0.0] , 0.0 , 0.0
+        if not self.vehicle or not self.destination: return [0.0, 0.0, 0.0], 0.0, 0.0
+        
+        car_tf = self.vehicle.get_transform()
+        dist = math.sqrt((self.destination.x - car_tf.location.x)**2 + (self.destination.y - car_tf.location.y)**2)
+        
+        # Local Waypoint Tracking
+        carla_map = self.world.get_map()
+        current_wp = carla_map.get_waypoint(car_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+        next_wps = current_wp.next(10.0)
+        target_loc = next_wps[0].transform.location if next_wps else current_wp.transform.location
 
-        # 1. Get current car location (The "Processed GPS")
-        current_loc = self.vehicle.get_location()
-        dest_loc = self.destination
-
-        # 2. Calculate Vector to Destination
-        dx = dest_loc.x - current_loc.x
-        dy = dest_loc.y - current_loc.y
-        
-        # 3. Distance
-        distance = math.sqrt(dx**2 + dy**2)
-        
-        # 4. Angle (bearing) to destination
-        target_angle = math.degrees(math.atan2(dy, dx))
-        
-        # 5. Car's current yaw
-        car_yaw = self.vehicle.get_transform().rotation.yaw
-        
-        # 6. Relative Angle (Error)
-        # 0 = Facing destination directly
-        # -ve = Dest is to the left, +ve = Dest is to the right
-        angle_diff = (target_angle - car_yaw) % 360.0
+        target_angle = math.degrees(math.atan2(target_loc.y - car_tf.location.y, target_loc.x - car_tf.location.x))
+        angle_diff = (target_angle - car_tf.rotation.yaw) % 360.0
         if angle_diff > 180.0: angle_diff -= 360.0
         
-        # Return [Distance, Angle, Speed]
         v = self.vehicle.get_velocity()
         speed = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
-        norm_dist = min(distance / 500.0, 1.0)
-        norm_angle = angle_diff / 180.0
-        norm_speed = min(speed / 50.0, 1.0) # 50 km/h max
-        
-        # Return: [AI Vector], Raw Dist, Raw Angle
-        return [norm_dist, norm_angle, norm_speed] , distance , angle_diff
-
-
+        return [min(dist / 500.0, 1.0), angle_diff / 180.0, min(speed / 50.0, 1.0)], dist, angle_diff
+    
     # --- REWARD FUNCTION (New Seperate Function) ---
     def _calculate_reward(self, action):
-        reward = 0
-        done = False
-        
-        # 1. Collision (Critical Penalty)
+        reward = 0.0
+        steer, throttle, brake = float(action[0]), float(action[1]), float(action[2])
+        nav_vector, distance, angle_diff = self._get_navigation()
+        norm_speed, angle_rad = nav_vector[2], math.radians(angle_diff)
+
         if len(self.data['collision']) > 0:
             reward += Config.REWARD_COLLISION
             self.stats["collision_count"] += 1
-            done = True
             self.data['collision'] = []
-            
+            return reward, True, nav_vector
 
-        # 2. Lane Invasion (Minor Penalty)
+        if distance < 5.0:
+            reward += Config.REWARD_GOAL_REACHED
+            self.stats["distance_to_goal"] = distance
+            return reward, True, nav_vector
+
+        # Local & Global Progress
+        step_progress = (norm_speed * math.cos(angle_rad)) * Config.PROGRESS_REWARD_WEIGHT
+        reward += step_progress + (self.last_distance - distance) * 1.0
+        self.last_distance = distance
+        self.stats["total_progress_reward"] += step_progress
+        self.stats["distance_to_goal"] = distance
+        reward -= 0.1 # Step penalty
+
         if len(self.data['lane_invasion']) > 0:
             reward += Config.REWARD_LANE_INVASION
             self.stats["lane_invasions"] += 1
             self.data['lane_invasion'] = []
 
-        # 3. Progress Reward (Speed * Angle Match)
-        nav_vector, distance, angle_diff = self._get_navigation()
-        norm_speed = nav_vector[2]
-        angle_rad = math.radians(angle_diff)
-        
-        step_progress = (norm_speed * math.cos(angle_rad)) * Config.PROGRESS_REWARD_WEIGHT
-        reward += step_progress
-        self.stats["total_progress_reward"] += step_progress # TRACK THIS
-        self.stats["distance_to_goal"] = distance # UPDATE FINAL DISTANCE
-        
-        # 5. GOAL REACHED (New Use for Distance!)
-        if distance < 5.0:  # If within 5 meters of target
-            print("DESTINATION REACHED!")
-            reward += Config.REWARD_GOAL_REACHED # Big Success Reward
-            done = True
+        if norm_speed <= 0.05: reward += Config.REWARD_IDLE
 
-        # 4. Jerky Driving Penalty
-        steer = float(action[0])
+        # Comfort penalties
         jerk = abs(steer - self.last_steer)
-        if jerk > 0.5:
-            reward += Config.REWARD_JERK_PENALTY
-            self.stats["total_jerk_penalty"] += Config.REWARD_JERK_PENALTY
+        if jerk > 0.1:
+            j_pen = Config.REWARD_JERK_PENALTY * jerk
+            reward += j_pen
+            self.stats["total_jerk_penalty"] += j_pen
         self.last_steer = steer
+        
+        reward += (steer ** 2) *  Config.REWARD_SWERVE
+        reward += (brake * norm_speed) * Config.REWARD_HARD_BREAK
 
-        # 6. IDLE PENALTY
-        if norm_speed <= 0.05:
-            reward += Config.REWARD_IDLE
-
-        return reward, done, nav_vector
+        return reward, False, nav_vector
 
     def step(self, action):
         # --- SPECTATOR LOGIC ---
