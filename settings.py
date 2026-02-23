@@ -11,8 +11,8 @@ class Config:
     MAP = "Town02"
     
     # --- ENVIRONMENT NOISE ---
-    N_VEHICLES = 15
-    N_WALKERS = 10
+    N_VEHICLES = 5
+    N_WALKERS = 5
     
     # --- SENSOR SETTINGS ---
     IMG_WIDTH = 80
@@ -28,3 +28,4 @@ class Config:
     REWARD_GOAL_REACHED = 100.0
     REWARD_JERK_PENALTY = -5.0
     PROGRESS_REWARD_WEIGHT = 2.0
+    REWARD_IDLE = -2.0

@@ -182,10 +182,15 @@ class CarlaEnv:
         self.world.tick()
         
         # ... wait for sensors ...
-        while self.data['rgb'] is None or self.data['lidar'] is None:
+        timeout_counter = 0
+        while (self.data['rgb'] is None or self.data['lidar'] is None) and timeout_counter < 50:
             self.world.tick()
-            time.sleep(0.01)
+            time.sleep(0.05)
+            timeout_counter += 1
             
+        if timeout_counter >= 50:
+            print("WARNING: Sensors timed out during spawn. Forcing reset.")
+        
         # GET INITIAL STATE
         nav, _, _ = self._get_navigation()
         imu = self.data['imu'] if self.data['imu'] else [0.0]*6
@@ -457,6 +462,10 @@ class CarlaEnv:
             self.stats["total_jerk_penalty"] += Config.REWARD_JERK_PENALTY
         self.last_steer = steer
 
+        # 6. IDLE PENALTY
+        if norm_speed <= 0.05:
+            reward += Config.REWARD_IDLE
+
         return reward, done, nav_vector
 
     def step(self, action):
@@ -515,23 +524,23 @@ class CarlaEnv:
 
     def destroy_agents(self):
         print("Cleaning up actors...")
-        
         if self.world is not None:
-            # 1. Force unfreeze the server
-            settings = self.world.get_settings()
-            settings.synchronous_mode = False # Disable Sync
-            settings.fixed_delta_seconds = None
-            self.world.apply_settings(settings)
+            # 1. Stop sensors safely before deleting
+            for actor in self.actor_list:
+                if actor is not None and actor.is_alive:
+                    if actor.type_id.startswith('sensor'):
+                        actor.stop()
             
-            self.world.wait_for_tick()
-        
-        # 2. Stop and Destroy all actors
-        for actor in self.actor_list:
-            if actor is not None and actor.is_alive:
-                if hasattr(actor, 'stop'): 
-                    actor.stop() # Stop sensor listening
-                actor.destroy()
+            # 2. Batch destroy everything instantly (Prevents timeouts)
+            batch = [carla.command.DestroyActor(x) for x in self.actor_list if x is not None and x.is_alive]
+            
+            # Send the batch command to the server
+            self.client.apply_batch_sync(batch, True)
+            
+            self.actor_list.clear()
+
+            # 3. Tick the world a few times to let the server flush its memory
+            for _ in range(5):
+                self.world.tick()
                 
-        self.actor_list = []
-        
-        print("Done.")
+        print("Cleanup done.")
