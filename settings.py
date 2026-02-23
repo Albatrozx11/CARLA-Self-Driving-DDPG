@@ -2,11 +2,11 @@ import carla
 
 class Config:
     # --- SIMULATOR SETTINGS ---
-    SIMULATOR_HOST = "127.0.0.1"
+    SIMULATOR_HOST = "172.31.240.1"
     SIMULATOR_PORT = 2000
-    TIMEOUT = 10.0
+    TIMEOUT = 30.0
     SYNC_MODE = True
-    FIXED_DELTA_SECONDS = 0.05
+    FIXED_DELTA_SECONDS = 0.1
     VISUALIZE = True
     MAP = "Town02"
     

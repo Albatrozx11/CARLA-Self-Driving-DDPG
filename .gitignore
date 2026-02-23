@@ -17,3 +17,16 @@ sdist/
 var/
 wheels/
 *.egg-info/
+
+# --- CARLA AI Project Exclusions ---
+
+# Ignore TensorBoard and training logs
+logs/
+training_logs.csv
+
+# Ignore specific environment and compiler binaries
+carla_sim/
+libdevice.10.bc
+
+# Ignore saved neural network model weights
+*.h5

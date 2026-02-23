@@ -4,16 +4,19 @@ import os
 import time
 import random
 import math
+import platform
 import numpy as np
 from settings import Config
 # --- 1. SETUP PATHS ---
-egg_path = r"C:\Adithyan\CARLA_0.9.14\WindowsNoEditor\PythonAPI\carla\dist\carla-0.9.14-py3.7-win-amd64.egg"
-sys.path.append(egg_path)
-
+if platform.system() == "windows":
+    egg_path = r"C:\Adithyan\CARLA_0.9.14\WindowsNoEditor\PythonAPI\carla\dist\carla-0.9.14-py3.7-win-amd64.egg"
+    sys.path.append(egg_path)
+else:
+    print("Running on Linux/WSL")
 try:
     import carla
 except ImportError:
-    print("ERROR: Python could not load the CARLA library.")
+    print("ERROR: Could not load CARLA. Use 'pip install carla==0.9.14' in WSL.")
     sys.exit(1)
 
 # --- 2. THE ENVIRONMENT WRAPPER ---
