@@ -17,13 +17,14 @@ class DDPGTrainer:
 
     @tf.function
     def update(self, states, actions, rewards, next_states, dones):
+        # --- PRE-CALCULATE TARGETS OUTSIDE THE TAPE ---
+        # We set training=False because we DO NOT want to track gradients for target networks
+        target_actions = self.target_actor(next_states, training=False)
+        y = rewards + self.gamma * self.target_critic(next_states + [target_actions], training=False) * (1 - dones)
+
         # --- 1. Update Critic ---
         with tf.GradientTape() as tape:
-            # Predict target actions and Q-values
-            target_actions = self.target_actor(next_states, training=True)
-            y = rewards + self.gamma * self.target_critic(next_states + [target_actions], training=True) * (1 - dones)
-            
-            # Current Q-value
+            # ONLY track the live critic network inside the tape
             critic_value = self.critic(states + [actions], training=True)
             critic_loss = tf.math.reduce_mean(tf.math.square(y - critic_value))
 

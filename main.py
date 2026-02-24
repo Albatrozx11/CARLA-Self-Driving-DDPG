@@ -7,7 +7,7 @@ from logger import TrainingLogger  # 1. Import your new logger
 from model import create_actor, create_critic
 from ddpg_learner import ReplayBuffer, DDPGTrainer, OUNoise 
 from settings import Config
-
+import time
 
 import tensorflow as tf
 gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -70,10 +70,17 @@ def main():
             ep_critic_loss = 0
             training_steps = 0
 
+            # --- FPS TRACKING SETUP ---
+            fps_step_count = 0
+            start_time = time.time()
+            
 
+            episode_step_limit = 500 
+            current_step = 0
             print(f"Episode {episode} started. Press 'q' to quit.")
 
-            while not done:
+            while not done and current_step < episode_step_limit:
+                current_step += 1
                 # 1. Prepare State for Model
                 # state[0] is Camera, state[1] is lidar state[2] is Physics vector
                 cur_state_img = state[0][np.newaxis, ...]
@@ -183,6 +190,16 @@ def main():
                     })
                     return # Exit the entire main function
                 '''
+                # --- FPS TRACKING LOGIC ---
+                fps_step_count += 1
+                if fps_step_count % 10 == 0:
+                    elapsed_time = time.time() - start_time
+                    fps = 10 / elapsed_time
+                    # \r overwrites the line so it doesn't spam your terminal
+                    print(f"Episode {episode} | Step {fps_step_count} | Speed: {fps:.1f} FPS", end="\r")
+                    start_time = time.time()
+                    
+            # print()
             if episode % 10 == 0:
                 actor.save_weights("echo_drive_actor.h5")
                 critic.save_weights("echo_drive_critic.h5")
