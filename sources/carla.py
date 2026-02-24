@@ -193,6 +193,7 @@ class CarlaEnv:
         
         nav_vector, distance_to_goal, angle_diff = self._get_navigation()
         self.last_distance = distance_to_goal  # <--- ADD THIS
+        self.initial_distance = distance_to_goal
         
         imu = self.data['imu'] if self.data['imu'] else [0.0]*6
         
@@ -421,8 +422,15 @@ class CarlaEnv:
             return reward, True, nav_vector
 
         # Local & Global Progress
+
         step_progress = (norm_speed * math.cos(angle_rad)) * Config.PROGRESS_REWARD_WEIGHT
-        reward += step_progress + (self.last_distance - distance) * 1.0
+        
+        distance_delta = self.last_distance - distance
+        
+
+        normalized_distance_reward = (distance_delta / max(self.initial_distance, 1.0)) * 50.0 
+        
+        reward += step_progress + normalized_distance_reward
         self.last_distance = distance
         self.stats["total_progress_reward"] += step_progress
         self.stats["distance_to_goal"] = distance
@@ -475,15 +483,24 @@ class CarlaEnv:
 
         # --- CONTROL LOGIC ---
         steer = float(action[0])
-        throttle = float(action[1])
-        brake = float(action[2])
+        raw_throttle = float(action[1])
+        raw_brake = float(action[2])
+        
+        # --- THE PEDAL FIX: Stronger signal wins ---
+        if raw_throttle > raw_brake:
+            throttle = raw_throttle
+            brake = 0.0
+        else:
+            throttle = 0.0
+            brake = raw_brake
+            
         self.vehicle.apply_control(carla.VehicleControl(steer=steer, throttle=throttle, brake=brake))
         #self.vehicle.set_autopilot(True)
         
         self.world.tick()
         
         #Calculate Reward & Done using helper functions
-        reward, done, nav_vector = self._calculate_reward(action)
+        reward, done, nav_vector = self._calculate_reward([steer, throttle, brake])
         
         # UPDATE STATS
         self.stats["step_count"] += 1

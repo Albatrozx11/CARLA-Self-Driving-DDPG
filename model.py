@@ -23,8 +23,14 @@ def create_actor(img_shape=(80, 80, 1), vec_shape=(9,)):
     d1 = Dense(256, activation="relu")(concat)
     d2 = Dense(128, activation="relu")(d1)
     
-    # Output: [Steer, Throttle, Brake]
-    outputs = Dense(3, activation="tanh")(d2)
+    # 1. Steering gets Tanh (Outputs -1.0 to 1.0)
+    steer = Dense(1, activation="tanh", name="steer_out")(d2)
+    
+    # 2. Gas and Brake get Sigmoid (Outputs 0.0 to 1.0)
+    pedals = Dense(2, activation="sigmoid", name="pedals_out")(d2)
+    
+    # 3. Recombine them back into a single array: [Steer, Throttle, Brake]
+    outputs = Concatenate()([steer, pedals])
     
     return tf.keras.Model(inputs=[cam_input, lidar_input, vec_input], outputs=outputs)
 
