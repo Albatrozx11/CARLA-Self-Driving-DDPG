@@ -48,7 +48,7 @@ def main():
     # Initialize Helper Classes
     buffer = ReplayBuffer(capacity=10000)
     trainer = DDPGTrainer(actor, critic, target_actor, target_critic)
-    noise_gen = OUNoise(action_dimension=3)
+    noise_gen = OUNoise(action_dimension=2)
 
     # Initialize TensorBoard Writer
     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -75,12 +75,11 @@ def main():
             start_time = time.time()
             
 
-            episode_step_limit = 500 
-            current_step = 0
+            # episode_step_limit = 500 
+            # current_step = 0
             print(f"Episode {episode} started. Press 'q' to quit.")
 
-            while not done and current_step < episode_step_limit:
-                current_step += 1
+            while not done:
                 # 1. Prepare State for Model
                 # state[0] is Camera, state[1] is lidar state[2] is Physics vector
                 cur_state_img = state[0][np.newaxis, ...]
@@ -90,8 +89,9 @@ def main():
                 # 2. Get Action + Decaying Noise
                 mu_action = actor.predict([cur_state_img, cur_lidar, cur_state_vec], verbose=0)[0]
                 noise = noise_gen.noise() * epsilon  # <--- Scale the noise here
-                # Scale throttle/brake (indices 1,2) to be positive 0-1
-                final_action = np.clip(mu_action + noise, [-1.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+                
+                # Scale steer [-1, 1] and accel [-1, 1]
+                final_action = np.clip(mu_action + noise, [-1.0, -1.0], [1.0, 1.0])
 
                 # 3. Environment Step
                 next_state, reward, done, stats = env.step(final_action)
@@ -99,18 +99,14 @@ def main():
                 # 4. Store and Train
                 buffer.store(state, final_action, reward, next_state, done)
 
-                if buffer.size > 64:
-                    samples = buffer.sample(batch_size=64)
+                if buffer.size > 32:
+                    samples = buffer.sample(batch_size=32)
                     a_loss, c_loss = trainer.update(*samples)
                     ep_actor_loss += a_loss
                     ep_critic_loss += c_loss
                     training_steps += 1
 
                 state=next_state
-
-                # --- Decay Epsilon ---
-                if epsilon > epsilon_min:
-                    epsilon *= epsilon_decay
 
                 # --- Visualization ---
                 if state[0] is not None:
@@ -159,11 +155,15 @@ def main():
                     # Steer (White)
                     cv2.putText(display_cam, f"Steer: {final_action[0]:.2f}", (10, 60), font, 0.7, (255, 255, 255), 2)
                     
+                    # Throttle/Brake Mapping
+                    throttle_mapped = max(0.0, final_action[1])
+                    brake_mapped = abs(min(0.0, final_action[1]))
+
                     # Throttle (Green)
-                    cv2.putText(display_cam, f"Gas:   {final_action[1]:.2f}", (10, 90), font, 0.7, (0, 255, 0), 2)
+                    cv2.putText(display_cam, f"Gas:   {throttle_mapped:.2f}", (10, 90), font, 0.7, (0, 255, 0), 2)
                     
                     # Brake (Red)
-                    cv2.putText(display_cam, f"Brake: {final_action[2]:.2f}", (10, 120), font, 0.7, (0, 0, 255), 2)
+                    cv2.putText(display_cam, f"Brake: {brake_mapped:.2f}", (10, 120), font, 0.7, (0, 0, 255), 2)
 
                     # Show the final overlay
                     cv2.imshow("EchoDrive Dashcam", display_cam)
@@ -205,6 +205,13 @@ def main():
                 critic.save_weights("echo_drive_critic.h5")
                 print("Checkpoint Saved.")
 
+            if stats.get("idle_steps", 0) >= 100:
+                final_result = "Paralyzed/Idle"
+            elif "off_road_lane_type" in stats:
+                final_result = f"Off-Road ({stats['off_road_lane_type']})"
+            else:
+                final_result = "Success" if stats["distance_to_goal"] < 5.0 else "Crashed/Failed"
+
             logger.log_episode({
                 "episode": episode,
                 "total_reward": round(stats["total_reward"], 2),
@@ -214,13 +221,18 @@ def main():
                 "lane_invasions": stats["lane_invasions"],
                 "progress_reward": round(stats["total_progress_reward"], 2),
                 "jerk_penalty": round(stats["total_jerk_penalty"], 2),
-                "result": "Success" if stats["distance_to_goal"] < 5.0 else "Crashed/Failed"
+                "result": final_result
             })
             with summary_writer.as_default():
                 tf.summary.scalar('Reward/Total_Reward', stats["total_reward"], step=episode)
                 tf.summary.scalar('Reward/Distance_to_Goal', stats["distance_to_goal"], step=episode)
                 tf.summary.scalar('Metrics/Max_Speed', stats["max_speed"], step=episode)
                 tf.summary.scalar('Metrics/Collisions', stats["collision_count"], step=episode)
+                
+                # --- Decay Epsilon ---
+                if epsilon > epsilon_min:
+                    epsilon *= epsilon_decay
+                    
                 tf.summary.scalar('Metrics/Epsilon', epsilon, step=episode)
                 
                 # Only log loss if we actually trained this episode
