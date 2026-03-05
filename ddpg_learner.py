@@ -67,7 +67,7 @@ class ReplayBuffer:
         self.next_state_lidar = np.zeros((capacity, *img_shape), dtype=np.float32)
         self.next_state_vec = np.zeros((capacity, *vec_shape), dtype=np.float32)
 
-        self.actions = np.zeros((capacity, 3), dtype=np.float32)
+        self.actions = np.zeros((capacity, 2), dtype=np.float32)
         self.rewards = np.zeros((capacity, 1), dtype=np.float32)
         self.dones = np.zeros((capacity, 1), dtype=np.float32)
 

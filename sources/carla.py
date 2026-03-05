@@ -59,6 +59,7 @@ class CarlaEnv:
         
         self.stats = {
             "step_count": 0,
+            "idle_steps" : 0,
             "total_reward": 0,
             "max_speed": 0,
             "lane_invasions": 0,
@@ -83,6 +84,7 @@ class CarlaEnv:
         
         self.stats = {
             "step_count": 0,
+            "idle_steps": 0,
             "total_reward": 0,
             "max_speed": 0,
             "lane_invasions": 0,
@@ -118,8 +120,15 @@ class CarlaEnv:
             self.vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_point)
         
         self.destination = random.choice(spawn_points).location
+        dist = math.sqrt((self.destination.x - spawn_point.location.x)**2 + (self.destination.y - spawn_point.location.y)**2)
+        
+        # Keep picking a new destination until it is at least 50 meters away
+        while dist < 50.0:
+            self.destination = random.choice(spawn_points).location
+            dist = math.sqrt((self.destination.x - spawn_point.location.x)**2 + (self.destination.y - spawn_point.location.y)**2)
+        
         self.actor_list.append(self.vehicle)
-        self.vehicle.set_autopilot(False) 
+        # self.vehicle.set_autopilot(False) # Removed to prevent RPC timeouts during resets
 
         # 3. Spawn Traffic & Walkers (The Environment Noise)
         self._spawn_traffic(bp_lib, spawn_points)
@@ -191,7 +200,7 @@ class CarlaEnv:
         if timeout_counter >= 50:
             print("WARNING: Sensors timed out during spawn. Forcing reset.")
         
-        nav_vector, distance_to_goal, angle_diff = self._get_navigation()
+        nav_vector, distance_to_goal, angle_diff, cte, is_off_road, _ = self._get_navigation()
         self.last_distance = distance_to_goal  # <--- ADD THIS
         self.initial_distance = distance_to_goal
         
@@ -383,14 +392,45 @@ class CarlaEnv:
     
     # --- GNSS PROCESSING LOGIC ---
     def _get_navigation(self):
-        if not self.vehicle or not self.destination: return [0.0, 0.0, 0.0], 0.0, 0.0
+        if not self.vehicle or not self.destination: return [0.0, 0.0, 0.0], 0.0, 0.0, 0.0, False
         
         car_tf = self.vehicle.get_transform()
         dist = math.sqrt((self.destination.x - car_tf.location.x)**2 + (self.destination.y - car_tf.location.y)**2)
         
         # Local Waypoint Tracking
         carla_map = self.world.get_map()
+        
+        # Get the projected waypoint across ALL lane types
+        exact_wp = carla_map.get_waypoint(car_tf.location, project_to_road=True, lane_type=carla.LaneType.Any)
+        is_off_road = False
+        off_road_lane_type = "Unknown"
+        
+        # Sidewalk, Median, Border are fatal. Shoulder is just penalized heavily by CTE without terminating.
+        forbidden_lanes = [carla.LaneType.Sidewalk, carla.LaneType.Median, carla.LaneType.Border]
+        
+        if exact_wp is None:
+            is_off_road = True
+            off_road_lane_type = "Off-Map"
+        else:
+            # Calculate distance from car to the center of this exact snapped waypoint
+            wp_loc = exact_wp.transform.location
+            dist_to_wp = math.sqrt((car_tf.location.x - wp_loc.x)**2 + (car_tf.location.y - wp_loc.y)**2)
+            
+            # If the car is physically > 3m away from the nearest valid surface, it's out of bounds (Grass)
+            if dist_to_wp > 3.0:
+                is_off_road = True
+                off_road_lane_type = "Grass/Terrain"
+            elif exact_wp.lane_type in forbidden_lanes:
+                is_off_road = True
+                off_road_lane_type = exact_wp.lane_type.name
+        
+        # Get the projected driving waypoint for navigation so the AI always knows where it *should* be
         current_wp = carla_map.get_waypoint(car_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+        
+        # Calculate Cross-Track Error (CTE) -> How far is the car from the center of the lane?
+        wp_loc = current_wp.transform.location
+        cte = math.sqrt((car_tf.location.x - wp_loc.x)**2 + (car_tf.location.y - wp_loc.y)**2)
+        
         next_wps = current_wp.next(10.0)
         target_loc = next_wps[0].transform.location if next_wps else current_wp.transform.location
 
@@ -401,19 +441,29 @@ class CarlaEnv:
         v = self.vehicle.get_velocity()
         speed = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
-        return [min(dist / 500.0, 1.0), angle_diff / 180.0, min(speed / 50.0, 1.0)], dist, angle_diff
+        return [min(dist / 500.0, 1.0), angle_diff / 180.0, min(speed / 50.0, 1.0)], dist, angle_diff, cte, is_off_road, off_road_lane_type
     
     # --- REWARD FUNCTION (New Seperate Function) ---
     def _calculate_reward(self, action):
         reward = 0.0
-        steer, throttle, brake = float(action[0]), float(action[1]), float(action[2])
-        nav_vector, distance, angle_diff = self._get_navigation()
+        steer, accel = float(action[0]), float(action[1])
+        throttle = max(0.0, accel)
+        brake = abs(min(0.0, accel))
+        
+        nav_vector, distance, angle_diff, cte, is_off_road, off_road_lane_type = self._get_navigation()
         norm_speed, angle_rad = nav_vector[2], math.radians(angle_diff)
 
+        # 1. Catastrophic Failures
         if len(self.data['collision']) > 0:
             reward += Config.REWARD_COLLISION
             self.stats["collision_count"] += 1
             self.data['collision'] = []
+            return reward, True, nav_vector
+            
+        if is_off_road:
+            reward = Config.REWARD_OFF_ROAD
+            print(f"Agent drove off-road! Terminating episode... ({off_road_lane_type})")
+            self.stats["off_road_lane_type"] = off_road_lane_type
             return reward, True, nav_vector
 
         if distance < 5.0:
@@ -421,19 +471,18 @@ class CarlaEnv:
             self.stats["distance_to_goal"] = distance
             return reward, True, nav_vector
 
-        # Local & Global Progress
-
+        # 2. Local & Global Progress
         step_progress = (norm_speed * math.cos(angle_rad)) * Config.PROGRESS_REWARD_WEIGHT
-        
-        distance_delta = self.last_distance - distance
-        
-
-        normalized_distance_reward = (distance_delta / max(self.initial_distance, 1.0)) * 50.0 
-        
-        reward += step_progress + normalized_distance_reward
+        reward += step_progress
         self.last_distance = distance
         self.stats["total_progress_reward"] += step_progress
         self.stats["distance_to_goal"] = distance
+        
+        # 3. Lane Centering Penalty (Cross-Track Error)
+        # Penalize the agent the further it gets from the center of the lane
+        if cte > 0.5: # 0.5 meters of 'wiggle room'
+            reward -= (cte * Config.CTE_PENALTY_WEIGHT)
+            
         reward -= 0.1 # Step penalty
 
         if len(self.data['lane_invasion']) > 0:
@@ -441,7 +490,21 @@ class CarlaEnv:
             self.stats["lane_invasions"] += 1
             self.data['lane_invasion'] = []
 
-        if norm_speed <= 0.05: reward += Config.REWARD_IDLE
+        # --- THE FIX: The Idle Timeout ---
+        # We no longer give an instant massive negative reward every single step.
+        # Instead, we just track idle steps, and terminate gracefully with a penalty if stuck too long.
+        if norm_speed <= 0.05:
+            self.stats["idle_steps"] += 1
+            reward -= 5.0 # High per-step penalty, to prevent delaying the terminal penalty
+        else:
+            self.stats["idle_steps"] = 0 # Reset if it moves!
+
+        # If it sits still for 100 steps, KILL the episode with a moderate penalty
+        if self.stats["idle_steps"] >= 100:
+            # BUG FIX: Ensure the catastrophic idle penalty is actually applied
+            reward = Config.REWARD_IDLE 
+            print("AI Paralyzed! Terminating episode...")
+            return reward, True, nav_vector
 
         # Comfort penalties
         jerk = abs(steer - self.last_steer)
@@ -451,8 +514,21 @@ class CarlaEnv:
             self.stats["total_jerk_penalty"] += j_pen
         self.last_steer = steer
         
+        
         reward += (steer ** 2) *  Config.REWARD_SWERVE
+        
+        # --- NEW: The Spinning Tax ---
+        # Heavily penalize high steering angles if the car is barely moving forward
+        if abs(steer) > 0.3 and norm_speed < 0.2:
+            reward -= 2.0  # Flat penalty for doing low-speed donuts
+            
+        # Optional: Bonus for driving perfectly straight
+        if abs(steer) < 0.05:
+            reward += 0.5
+            
+        # Penalize braking when going fast
         reward += (brake * norm_speed) * Config.REWARD_HARD_BREAK
+        
 
         return reward, False, nav_vector
 
@@ -483,16 +559,11 @@ class CarlaEnv:
 
         # --- CONTROL LOGIC ---
         steer = float(action[0])
-        raw_throttle = float(action[1])
-        raw_brake = float(action[2])
+        accel = float(action[1])
         
-        # --- THE PEDAL FIX: Stronger signal wins ---
-        if raw_throttle > raw_brake:
-            throttle = raw_throttle
-            brake = 0.0
-        else:
-            throttle = 0.0
-            brake = raw_brake
+        # Action space mapping: accel > 0 is throttle, accel < 0 is brake
+        throttle = max(0.0, accel)
+        brake = abs(min(0.0, accel))
             
         self.vehicle.apply_control(carla.VehicleControl(steer=steer, throttle=throttle, brake=brake))
         #self.vehicle.set_autopilot(True)
@@ -500,7 +571,8 @@ class CarlaEnv:
         self.world.tick()
         
         #Calculate Reward & Done using helper functions
-        reward, done, nav_vector = self._calculate_reward([steer, throttle, brake])
+        # BUG FIX: the reward function expects the 2D action [steer, accel] now.
+        reward, done, nav_vector = self._calculate_reward([steer, accel])
         
         # UPDATE STATS
         self.stats["step_count"] += 1
@@ -522,22 +594,35 @@ class CarlaEnv:
     def destroy_agents(self):
         print("Cleaning up actors...")
         if self.world is not None:
+            #fix for disconnection issue
+            settings = self.world.get_settings()
+            settings.synchronous_mode = False
+            self.world.apply_settings(settings)
+            
             # 1. Stop sensors safely before deleting
             for actor in self.actor_list:
                 if actor is not None and actor.is_alive:
                     if actor.type_id.startswith('sensor'):
                         actor.stop()
             
-            # 2. Batch destroy everything instantly (Prevents timeouts)
-            batch = [carla.command.DestroyActor(x) for x in self.actor_list if x is not None and x.is_alive]
+            # 2. Batch destroy everything instantly using Sync
+            # Using apply_batch_sync ensures the server actually deletes them before we proceed,
+            # preventing memory leaks and zombie actors from crashing the Unreal Engine backend.
+            batch = [carla.command.DestroyActor(x) for x in self.actor_list if x is not None]
             
-            # Send the batch command to the server
-            self.client.apply_batch_sync(batch, True)
+            # Send the batch command to the server synchronously
+            self.client.apply_batch_sync(batch)
             
             self.actor_list.clear()
 
-            # 3. Tick the world a few times to let the server flush its memory
-            for _ in range(5):
-                self.world.tick()
+            #wait half a second for windows to flush RAM and stuff
+            time.sleep(0.5)
+            
+            # Tick the world once without sync to allow the Unreal Engine to process the deletion frames
+            self.world.tick()
+            
+            #restore sync mode for next episode
+            settings.synchronous_mode = True
+            self.world.apply_settings(settings)
                 
         print("Cleanup done.")
