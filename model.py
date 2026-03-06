@@ -1,7 +1,7 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Conv2D, Flatten, Input, Dense, Concatenate
 
-def create_actor(img_shape=(80, 80, 1), vec_shape=(9,)):
+def create_actor(img_shape=(80, 80, 1), vec_shape=(29,)):
     # --- Head 1: Camera (RGB/Gray) ---
     cam_input = Input(shape=img_shape, name="cam_input")
     x = Conv2D(32, 5, strides=2, activation="relu")(cam_input)
@@ -36,7 +36,7 @@ def create_actor(img_shape=(80, 80, 1), vec_shape=(9,)):
     
     return tf.keras.Model(inputs=[cam_input, lidar_input, vec_input], outputs=outputs)
 
-def create_critic(img_shape=(80, 80, 1), vec_shape=(9,), action_shape=(2,)):
+def create_critic(img_shape=(80, 80, 1), vec_shape=(29,), action_shape=(2,)):
     # Inputs
     cam_input = Input(shape=img_shape, name="cam_input")
     lidar_input = Input(shape=img_shape, name="lidar_input")
