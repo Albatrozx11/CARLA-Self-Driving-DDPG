@@ -53,7 +53,7 @@ class DDPGTrainer:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity, img_shape=(80, 80, 1), vec_shape=(9,)):
+    def __init__(self, capacity, img_shape=(80, 80, 1), vec_shape=(29,)):
         self.capacity = capacity
         self.ptr = 0
         self.size = 0

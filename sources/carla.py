@@ -5,6 +5,7 @@ import time
 import random
 import math
 import platform
+import cv2
 import numpy as np
 from settings import Config
 # --- 1. SETUP PATHS ---
@@ -104,7 +105,7 @@ class CarlaEnv:
             carla.WeatherParameters.WetCloudySunset,
             carla.WeatherParameters.MidRainSunset
         ]
-        self.world.set_weather(random.choice(weather_presets))
+        self.world.set_weather(weather_presets[0])
 
         # 1. Spawn Car
         bp_lib = self.world.get_blueprint_library()
@@ -140,8 +141,8 @@ class CarlaEnv:
         # 3. ATTACH SENSORS (Hidden, but active)
         # RGB Camera (Hood)
         cam_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
-        cam_bp.set_attribute('image_size_x', str(Config.IMG_WIDTH))
-        cam_bp.set_attribute('image_size_y', str(Config.IMG_HEIGHT))
+        cam_bp.set_attribute('image_size_x', '128')
+        cam_bp.set_attribute('image_size_y', '128')
         cam_bp.set_attribute('fov', str(Config.CAM_FOV))
         cam_transform = carla.Transform(carla.Location(x=2.5, z=0.7))
         self.camera_sensor = self.world.spawn_actor(cam_bp, cam_transform, attach_to=self.vehicle)
@@ -282,23 +283,27 @@ class CarlaEnv:
     
 
     def _process_img(self, image):
-        # We process it (so it's ready for AI later), but we don't return it
-        i = np.array(image.raw_data)
+        # image.raw_data is a flat sequence of BGRA bytes
+        i = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
 
-        #reshape to 80x80
-        i2 = i.reshape((Config.IMG_HEIGHT, Config.IMG_WIDTH, 4))
+        #reshape to 128x128x4 (The raw stable render size from CARLA)
+        i2 = i.reshape((128, 128, 4))
 
-        #drop the alpha channel
-        rgb = i2[:, :, :3]
+        # CARLA returns BGRA. Extract BGR
+        bgr = i2[:, :, :3]
 
-        #convert to grayscale
-        grayscale = np.dot(rgb[...,:3], [0.299,0.587,0.114]) 
+        # SAFELY SHRINK TO 80x80 USING OPENCV
+        bgr_shrunk = cv2.resize(bgr, (Config.IMG_WIDTH, Config.IMG_HEIGHT), interpolation=cv2.INTER_AREA)
 
-        #Normalize
+        # Convert to Grayscale
+        # Grayscale = 0.114*B + 0.587*G + 0.299*R
+        grayscale = np.dot(bgr_shrunk, [0.114, 0.587, 0.299])
+
+        # Normalize to 0.0 - 1.0
         normalized = grayscale / 255.0
 
-        #Add channel demension for CNN
-        final_state_image = np.expand_dims(normalized,axis=-1)
+        # Add channel dimension for CNN
+        final_state_image = np.expand_dims(normalized, axis=-1).astype(np.float32)
 
         self.data['rgb'] = final_state_image
 
@@ -441,7 +446,31 @@ class CarlaEnv:
         v = self.vehicle.get_velocity()
         speed = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
-        return [min(dist / 500.0, 1.0), angle_diff / 180.0, min(speed / 50.0, 1.0)], dist, angle_diff, cte, is_off_road, off_road_lane_type
+        # Generate 10 local waypoints ahead of the car
+        waypoints_local = []
+        wp = current_wp
+        f_vec = car_tf.get_forward_vector()
+        r_vec = car_tf.get_right_vector()
+        
+        for _ in range(10):
+            # Advance exactly 2.0 meters along the road logic
+            next_wps = wp.next(2.0)
+            if next_wps:
+                wp = next_wps[0]
+            
+            dx = wp.transform.location.x - car_tf.location.x
+            dy = wp.transform.location.y - car_tf.location.y
+            
+            # Convert to local coordinates relative to the car's hood
+            local_x = dx * f_vec.x + dy * f_vec.y
+            local_y = dx * r_vec.x + dy * r_vec.y
+            
+            # Normalize reasonably (-1.0 to 1.0) using a 20m window
+            waypoints_local.extend([local_x / 20.0, local_y / 20.0])
+
+        nav_vector = [min(dist / 500.0, 1.0), angle_diff / 180.0, min(speed / 50.0, 1.0)] + waypoints_local
+        
+        return nav_vector, dist, angle_diff, cte, is_off_road, off_road_lane_type
     
     # --- REWARD FUNCTION (New Seperate Function) ---
     def _calculate_reward(self, action):

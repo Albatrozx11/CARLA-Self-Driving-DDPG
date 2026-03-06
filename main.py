@@ -110,9 +110,13 @@ def main():
 
                 # --- Visualization ---
                 if state[0] is not None:
-                    cv2.imshow("Camera View", state[0])
+                    display_cam = (state[0][:, :, 0] * 255).astype(np.uint8)
+                    display_cam = cv2.resize(display_cam, (400, 400), interpolation=cv2.INTER_NEAREST)
+                    cv2.imshow("Camera View", display_cam)
                 if state[1] is not None:
-                    cv2.imshow("LiDAR View", state[1])
+                    display_lidar = (state[1][:, :, 0] * 255).astype(np.uint8)
+                    display_lidar = cv2.resize(display_lidar, (400, 400), interpolation=cv2.INTER_NEAREST)
+                    cv2.imshow("LiDAR View", display_lidar)
                 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("Quitting loop...")

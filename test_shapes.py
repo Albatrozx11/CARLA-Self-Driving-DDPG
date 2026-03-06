@@ -11,7 +11,7 @@ critic = create_critic()
 
 cam_sample = np.random.rand(1, 80, 80, 1)
 lidar_sample = np.random.rand(1, 80, 80, 1)
-vec_sample = np.random.rand(1, 9)
+vec_sample = np.random.rand(1, 29)
 
 # Actor should return shape (1, 2)
 action = actor.predict([cam_sample, lidar_sample, vec_sample], verbose=0)
