@@ -3,6 +3,9 @@ Evaluation Mode: Run the trained agent without any training or noise.
 Usage: python evaluate.py
 """
 import cv2
+import os
+import csv
+import datetime
 import numpy as np
 from sources import CarlaEnv
 from model import create_actor
@@ -13,6 +16,28 @@ gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
+
+EVAL_LOG_FILE = "evaluation_logs.csv"
+EVAL_LOG_HEADER = ["timestamp", "episode", "result", "reward", "steps", "distance_to_goal", "collisions", "lane_invasions", "max_speed"]
+
+def log_eval_episode(episode, result, total_reward, steps, stats):
+    """Append one row to the evaluation CSV log."""
+    file_exists = os.path.exists(EVAL_LOG_FILE)
+    with open(EVAL_LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(EVAL_LOG_HEADER)
+        writer.writerow([
+            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            episode,
+            result,
+            round(total_reward, 2),
+            steps,
+            round(stats.get("distance_to_goal", -1), 2),
+            stats.get("collision_count", 0),
+            stats.get("lane_invasions", 0),
+            round(stats.get("max_speed", 0), 2)
+        ])
 
 def evaluate():
     env = CarlaEnv()
@@ -99,8 +124,11 @@ def evaluate():
                     return
 
             dist = stats.get("distance_to_goal", -1)
-            result = "SUCCESS!" if dist < 5.0 else "Failed"
+            result = "SUCCESS" if dist < 5.0 else "FAILED"
             print(f"Result: {result} | Reward: {total_reward:.1f} | Steps: {steps} | Dist: {dist:.1f}m")
+            
+            # Log to evaluation CSV
+            log_eval_episode(episode, result, total_reward, steps, stats)
 
             env.destroy_agents()
             episode += 1

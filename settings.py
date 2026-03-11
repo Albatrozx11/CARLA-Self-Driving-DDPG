@@ -31,6 +31,9 @@ class Config:
     REWARD_IDLE = -300.0
     REWARD_SWERVE = -1.0
     REWARD_HARD_BREAK = -1.0
+    REWARD_PROXIMITY_PENALTY = -10.0
+    DANGER_ZONE_DIST = 6.0
+    MAX_SPEED_KMH = 30.0
     
     # --- LANE KEEPING ---
     REWARD_OFF_ROAD = -300.0

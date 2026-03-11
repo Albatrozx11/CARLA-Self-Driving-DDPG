@@ -17,7 +17,7 @@ def start_carla(carla_executable):
     carla_cmd = [
         "powershell.exe",
         "-Command",
-        f'Start-Process -FilePath "{carla_executable}" -ArgumentList "-quality-level=Low -ResX=84 -ResY=84 -NoVsync"'
+        f'Start-Process -FilePath "{carla_executable}" -ArgumentList "-quality-level=Low -ResX=400 -ResY=400 -NoVsync"'
     ]
     subprocess.run(carla_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print("Sent launch command to Windows successfully.")

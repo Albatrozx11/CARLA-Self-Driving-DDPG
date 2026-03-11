@@ -138,32 +138,66 @@ def main():
 
                 # --- Visualization ---
                 if state[0] is not None:
-                    # Scale to 400x400 and convert from Grayscale to BGR
-                    display_cam = (state[0][:, :, 0] * 255).astype(np.uint8)
-                    display_cam = cv2.resize(display_cam, (400, 400), interpolation=cv2.INTER_NEAREST)
+                    display_cam = (state[0][:,:,0] * 255).astype(np.uint8)
+                    display_cam = cv2.resize(display_cam, (400,400), interpolation=cv2.INTER_NEAREST)
                     display_cam = cv2.cvtColor(display_cam, cv2.COLOR_GRAY2BGR)
-
-                    # --- OVERLAY WAYPOINTS ---
-                    # We no longer read Cartesian dots from the Neural Network vector. 
-                    # We pull them explicitly from the stats array (which carla.py populates in the background).
+                
                     waypoint_data = stats.get("waypoints_xy", [])
-                    
-                    # Origin of the car is at the bottom center of the 400x400 image
-                    origin_x, origin_y = 200, 380 
-
-                    if len(waypoint_data) == 20: # Ensure we have precisely 10 (x,y) pairs
+                
+                    origin_x = 200
+                    origin_y = 380
+                
+                    # Draw ego vehicle anchor
+                    cv2.circle(display_cam, (origin_x, origin_y), 6, (255,255,255), -1)
+                
+                    # --- Draw Waypoint Path ---
+                    if len(waypoint_data) == 20:
+                        prev_pt = None
                         for i in range(10):
-                            wp_x = waypoint_data[i * 2] * 25.0       # Un-normalize back to meters
-                            wp_y = waypoint_data[i * 2 + 1] * 25.0 
-
-                            # Map the local meters to pixel coordinates (Scale: 1 meter = roughly 8 pixels)
-                            pixel_x = int(origin_x + (wp_y * 8.0)) 
-                            pixel_y = int(origin_y - (wp_x * 8.0)) 
-
-                            # Draw the Waypoint target as a small bright yellow circle
-                            cv2.circle(display_cam, (pixel_x, pixel_y), 4, (0, 255, 255), -1)
-
-                    cv2.imshow("Camera View (With Global Route Targets)", display_cam)
+                            wp_x = waypoint_data[i*2] * 25.0
+                            wp_y = waypoint_data[i*2+1] * 25.0
+                
+                            pixel_x = int(origin_x + wp_y * 8.0)
+                            pixel_y = int(origin_y - wp_x * 8.0)
+                
+                            pt = (pixel_x, pixel_y)
+                
+                            # draw waypoint
+                            cv2.circle(display_cam, pt, 4, (0,255,255), -1)
+                
+                            # connect waypoints with path line
+                            if prev_pt is not None:
+                                cv2.line(display_cam, prev_pt, pt, (255,200,0), 2)
+                
+                            prev_pt = pt
+                
+                    # --- Draw Route Direction Arrow ---
+                    if len(waypoint_data) >= 2:
+                        wp_x = waypoint_data[0] * 25.0
+                        wp_y = waypoint_data[1] * 25.0
+                
+                        arrow_x = int(origin_x + wp_y * 8.0)
+                        arrow_y = int(origin_y - wp_x * 8.0)
+                
+                        cv2.arrowedLine(display_cam,
+                                        (origin_x, origin_y),
+                                        (arrow_x, arrow_y),
+                                        (0,255,0),
+                                        2,
+                                        tipLength=0.3)
+                
+                    # --- Draw speed indicator ---
+                    speed = stats.get("max_speed", 0)
+                    cv2.putText(display_cam, f"Speed: {speed:.1f} km/h", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # --- Draw Training Telemetry ---
+                    cv2.putText(display_cam, f"Steer: {action[0]:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    cv2.putText(display_cam, f"Accel: {action[1]:.2f}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                    cur_reward = stats.get("total_reward", 0)
+                    cv2.putText(display_cam, f"Reward: {cur_reward:.0f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                
+                    cv2.imshow("Camera View", display_cam)
                     
                 if state[1] is not None and len(state[1]) == 32:
                     # state[1] is now a 1D array of 32 distances. 

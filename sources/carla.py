@@ -75,7 +75,9 @@ class CarlaEnv:
             "collision_count": 0,
             "total_progress_reward": 0, # How much it earned for moving toward goal
             "total_jerk_penalty": 0,     # How much it was punished for shaky steering
-            "distance_to_goal": 0        # Final distance when episode ended
+            "distance_to_goal": 0,       # Final distance when episode ended
+            "proximity_penalty": 0.0,
+            "forward_obstacle_dist": Config.LIDAR_RANGE
         }
 
     def reset(self):
@@ -100,7 +102,9 @@ class CarlaEnv:
             "collision_count": 0,
             "total_progress_reward": 0, # How much it earned for moving toward goal
             "total_jerk_penalty": 0,     # How much it was punished for shaky steering
-            "distance_to_goal": 0        # Final distance when episode ended
+            "distance_to_goal": 0,       # Final distance when episode ended
+            "proximity_penalty": 0.0,
+            "forward_obstacle_dist": Config.LIDAR_RANGE
         }
         
         # 1. Randomize Weather (Visual Irregularities)
@@ -219,7 +223,7 @@ class CarlaEnv:
             print("WARNING: Sensors timed out during spawn. Forcing reset.")
             return self.reset()
         
-        nav_vector, distance_to_goal, angle_diff, cte, is_off_road, _, _ = self._get_navigation()
+        nav_vector, distance_to_goal, angle_diff, cte, is_off_road, _, _, _ = self._get_navigation()
         self.last_distance = distance_to_goal  # <--- ADD THIS
         self.initial_distance = distance_to_goal
         
@@ -363,6 +367,13 @@ class CarlaEnv:
             # Project minimum closest bounds recursively across local numpy tensor bins
             np.minimum.at(lidar_bins, bin_indices, norm_distances)
 
+        # --- Extract forward obstacle distance for DENSE REWARD ---
+        # With 32 bins spanning 180 degrees (-90 to +90 from forward),
+        # forward (0 degrees) corresponds to the middle bins.
+        # Bins 14, 15, 16, 17 cover the immediate front arch of the car.
+        front_bins = lidar_bins[14:18]
+        self.stats["forward_obstacle_dist"] = float(np.min(front_bins) * Config.LIDAR_RANGE)
+
         # Inject 1D flat layer tensor sequence
         self.data['lidar'] = lidar_bins
 
@@ -474,56 +485,76 @@ class CarlaEnv:
         wp = current_wp # The physically closest Driving waypoint to car
         anchor_idx = self.current_route_index
         target_loc = car_loc
+        in_junction = current_wp.is_junction
         
-        for i in range(10):
-            next_wps = wp.next(2.0)
-            if not next_wps:
-                pass # Can't go further? Just repeat the last one
-            elif len(next_wps) == 1:
-                wp = next_wps[0]
-            else:
-                # Intersection! Use global_route to pick the right branch
-                lookahead_idx = min(anchor_idx + 20, len(self.global_route) - 1)
-                target_anchor = self.global_route[lookahead_idx][0]
+        if in_junction:
+            # --- JUNCTION FIX: Pull waypoints directly from the global A* route ---
+            # When inside a junction, CARLA's wp.next() returns the straight-ahead path,
+            # NOT the turn the global route planned. This caused waypoints to snap from
+            # "turn right" to "go straight" mid-junction, confusing the agent.
+            for i in range(10):
+                route_idx = min(self.current_route_index + i + 1, len(self.global_route) - 1)
+                route_wp = self.global_route[route_idx][0]
                 
-                # Look ahead in the global route for an anchor point across the intersection
-                search_end = min(anchor_idx + 50, len(self.global_route))
-                for j in range(anchor_idx, search_end):
-                    candidate_wp = self.global_route[j][0]
-                    dist_to_cand = wp.transform.location.distance(candidate_wp.transform.location)
-                    if dist_to_cand > 5.0:
-                        target_anchor = candidate_wp
-                        anchor_idx = j
-                        break
+                if i == 0:
+                    target_loc = route_wp.transform.location
                 
-                # Pick the branch that physically points toward target_anchor
-                best_dist = float('inf')
-                best_wp = next_wps[0]
-                for branch in next_wps:
-                    # Cast a ray 10 meters into the future along this branch
-                    branch_future = branch.next(10.0)
-                    eval_wp = branch_future[0] if branch_future else branch
+                dx = route_wp.transform.location.x - car_tf.location.x
+                dy = route_wp.transform.location.y - car_tf.location.y
+                
+                local_x = dx * f_vec.x + dy * f_vec.y
+                local_y = dx * r_vec.x + dy * r_vec.y
+                
+                waypoints_local.extend([local_x / 25.0, local_y / 25.0])
+        else:
+            # --- NORMAL ROAD: Use wp.next() with global route branch selection ---
+            for i in range(10):
+                next_wps = wp.next(2.0)
+                if not next_wps:
+                    pass # Can't go further? Just repeat the last one
+                elif len(next_wps) == 1:
+                    wp = next_wps[0]
+                else:
+                    # Intersection ahead! Use global_route to pick the right branch
+                    lookahead_idx = min(anchor_idx + 20, len(self.global_route) - 1)
+                    target_anchor = self.global_route[lookahead_idx][0]
                     
-                    d = eval_wp.transform.location.distance(target_anchor.transform.location)
-                    if d < best_dist:
-                        best_dist = d
-                        best_wp = branch
-                wp = best_wp
+                    # Look ahead in the global route for an anchor point across the intersection
+                    search_end = min(anchor_idx + 50, len(self.global_route))
+                    for j in range(anchor_idx, search_end):
+                        candidate_wp = self.global_route[j][0]
+                        dist_to_cand = wp.transform.location.distance(candidate_wp.transform.location)
+                        if dist_to_cand > 5.0:
+                            target_anchor = candidate_wp
+                            anchor_idx = j
+                            break
+                    
+                    # Pick the branch that physically points toward target_anchor
+                    best_dist = float('inf')
+                    best_wp = next_wps[0]
+                    for branch in next_wps:
+                        # Cast a ray 10 meters into the future along this branch
+                        branch_future = branch.next(10.0)
+                        eval_wp = branch_future[0] if branch_future else branch
+                        
+                        d = eval_wp.transform.location.distance(target_anchor.transform.location)
+                        if d < best_dist:
+                            best_dist = d
+                            best_wp = branch
+                    wp = best_wp
 
-            if i == 0:
-                target_loc = wp.transform.location
+                if i == 0:
+                    target_loc = wp.transform.location
 
-            dx = wp.transform.location.x - car_tf.location.x
-            dy = wp.transform.location.y - car_tf.location.y
+                dx = wp.transform.location.x - car_tf.location.x
+                dy = wp.transform.location.y - car_tf.location.y
 
-            
-            
-            # Convert to local coordinates relative to the car's hood
-            local_x = dx * f_vec.x + dy * f_vec.y
-            local_y = dx * r_vec.x + dy * r_vec.y
-            
-            # Normalize reasonably (-1.0 to 1.0) using a 25m window to avoid squash saturation
-            waypoints_local.extend([local_x / 25.0, local_y / 25.0])
+                # Convert to local coordinates relative to the car's hood
+                local_x = dx * f_vec.x + dy * f_vec.y
+                local_y = dx * r_vec.x + dy * r_vec.y
+                
+                # Normalize reasonably (-1.0 to 1.0) using a 25m window to avoid squash saturation
+                waypoints_local.extend([local_x / 25.0, local_y / 25.0])
 
         # --- Heading Alignment (used for reward only, NOT fed to the network) ---
         next_idx = min(self.current_route_index + 5, len(self.global_route)-1)
@@ -561,7 +592,7 @@ class CarlaEnv:
         ] + waypoints_local
 
         # Return heading_alignment via the angle_diff slot so reward function can use it
-        return nav_vector, dist, heading_alignment, abs(route_cte), is_off_road, off_road_lane_type, waypoints_local
+        return nav_vector, dist, heading_alignment, abs(route_cte), is_off_road, off_road_lane_type, waypoints_local, current_wp.is_junction
     
     # --- REWARD FUNCTION (New Seperate Function) ---
     def _calculate_reward(self, action):
@@ -570,7 +601,7 @@ class CarlaEnv:
         throttle = max(0.0, accel)
         brake = abs(min(0.0, accel))
         
-        nav_vector, distance, heading_alignment, cte, is_off_road, off_road_lane_type, wp_xy = self._get_navigation()
+        nav_vector, distance, heading_alignment, cte, is_off_road, off_road_lane_type, wp_xy, is_junction = self._get_navigation()
         self.stats["waypoints_xy"] = wp_xy  # Send raw Cartesian targets to main.py for cv2.circle drawing
         norm_speed = nav_vector[1]
 
@@ -602,9 +633,40 @@ class CarlaEnv:
         # Direct speed bonus - always reward ANY forward movement to prevent idle collapse
         #reward += norm_speed * 1.0
         
+        # --- DENSE OBSTACLE AVOIDANCE REWARD ---
+        # If an obstacle is directly in front of us, penalize high speeds!
+        min_dist = self.stats["forward_obstacle_dist"]
+        danger_zone = Config.DANGER_ZONE_DIST # meters
+        
+        if min_dist < danger_zone:
+            # The closer the object, the higher the danger multiplier (0.0 to 1.0)
+            danger_multiplier = 1.0 - (min_dist / danger_zone)
+            
+            if norm_speed > 0.05:
+                # The faster we are going, the harder we are penalized.
+                proximity_penalty = danger_multiplier * norm_speed * Config.REWARD_PROXIMITY_PENALTY
+                
+                # Cap the penalty so waiting at an intersection doesn't bleed reward to -15,000
+                if proximity_penalty < -25.0:
+                    proximity_penalty = -25.0 
+                    
+                reward += proximity_penalty
+                self.stats["proximity_penalty"] = proximity_penalty
+            else:
+                # If we are stopped (norm_speed = 0), penalty is 0, teaching the AI to stop!
+                self.stats["proximity_penalty"] = 0.0
+                
+            # Optional: Extra bonus for applying brakes when an object is close
+            if brake > 0.1:
+                reward += brake * danger_multiplier * 2.0
+                
+        else:
+            self.stats["proximity_penalty"] = 0.0
+        
         # 3. Lane Centering Penalty (Cross-Track Error)
         # Penalize the agent the further it gets from the center of the lane
-        if cte > 0.5: # 0.5 meters of 'wiggle room'
+        # SKIP at junctions — CTE is unreliable when the route waypoint is across the intersection
+        if not is_junction and cte > 0.5: # 0.5 meters of 'wiggle room'
             reward -= (cte * Config.CTE_PENALTY_WEIGHT)
             
         reward -= 0.1 # Step penalty
@@ -683,6 +745,13 @@ class CarlaEnv:
         # Action space mapping: accel > 0 is throttle, accel < 0 is brake
         throttle = max(0.0, accel)
         brake = abs(min(0.0, accel))
+        
+        # --- HARD SPEED CAP ---
+        v = self.vehicle.get_velocity()
+        current_speed_kmh = 3.6 * (v.x**2 + v.y**2 + v.z**2)**0.5
+        if current_speed_kmh > Config.MAX_SPEED_KMH:
+            throttle = 0.0
+            brake = 0.3  # Gentle braking to bring speed back under cap
             
         self.vehicle.apply_control(carla.VehicleControl(steer=steer, throttle=throttle, brake=brake))
         #self.vehicle.set_autopilot(True)
