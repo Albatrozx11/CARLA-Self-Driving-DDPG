@@ -1,6 +1,7 @@
 import cv2
 import datetime
 import os 
+import json
 import numpy as np
 from sources import CarlaEnv
 from logger import TrainingLogger  # 1. Import your new logger
@@ -46,7 +47,7 @@ def main():
     target_critic.set_weights(critic.get_weights())
 
     # Initialize Helper Classes
-    buffer = ReplayBuffer(capacity=10000)
+    buffer = ReplayBuffer(capacity=20000)
     trainer = DDPGTrainer(actor, critic, target_actor, target_critic)
     noise_gen = OUNoise(action_dimension=2)
 
@@ -59,9 +60,22 @@ def main():
     epsilon = 1.0          # Start with 100% noise
     epsilon_decay = 0.995  # Multiply by this after every episode
     epsilon_min = 0.05     # Never go below 5% noise (keeps a tiny bit of exploration)
+    start_episode = 1
+    
+    state_file = "training_state.json"
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, 'r') as f:
+                state_data = json.load(f)
+                start_episode = state_data.get("episode", 1) + 1 # Start from the next episode
+                epsilon = state_data.get("epsilon", 1.0)
+            print(f"Resuming from Episode {start_episode} with epsilon {epsilon:.4f}")
+        except Exception as e:
+            print(f"Failed to load training state: {e}")
+
     try:
         # Loop for multiple episodes
-        for episode in range(1, 1001): 
+        for episode in range(start_episode, start_episode + 10000): 
             state = env.reset()
             done = False
             noise_gen.reset()
@@ -87,7 +101,7 @@ def main():
                 cur_state_vec = np.array(state[2])[np.newaxis, ...]
 
                 # 2. Get Action + Decaying Noise
-                mu_action = actor.predict([cur_state_img, cur_lidar, cur_state_vec], verbose=0)[0]
+                mu_action = actor([cur_state_img, cur_lidar, cur_state_vec], training=False).numpy()[0]
                 noise = noise_gen.noise() * epsilon  # <--- Scale the noise here
                 
                 # Scale steer [-1, 1] and accel [-1, 1]
@@ -110,8 +124,64 @@ def main():
 
                 # --- Visualization ---
                 if state[0] is not None:
-                    display_cam = (state[0][:, :, 0] * 255).astype(np.uint8)
-                    display_cam = cv2.resize(display_cam, (400, 400), interpolation=cv2.INTER_NEAREST)
+                    display_cam = (state[0][:,:,0] * 255).astype(np.uint8)
+                    display_cam = cv2.resize(display_cam, (400,400), interpolation=cv2.INTER_NEAREST)
+                    display_cam = cv2.cvtColor(display_cam, cv2.COLOR_GRAY2BGR)
+
+                    waypoint_data = stats.get("waypoints_xy", [])
+
+                    origin_x = 200
+                    origin_y = 380
+
+                    # Draw ego vehicle anchor
+                    cv2.circle(display_cam, (origin_x, origin_y), 6, (255,255,255), -1)
+
+                    # --- Draw Waypoint Path ---
+                    if len(waypoint_data) == 20:
+                        prev_pt = None
+                        for i in range(10):
+                            wp_x = waypoint_data[i*2] * 25.0
+                            wp_y = waypoint_data[i*2+1] * 25.0
+
+                            pixel_x = int(origin_x + wp_y * 8.0)
+                            pixel_y = int(origin_y - wp_x * 8.0)
+
+                            pt = (pixel_x, pixel_y)
+
+                            # draw waypoint
+                            cv2.circle(display_cam, pt, 4, (0,255,255), -1)
+
+                            # connect waypoints with path line
+                            if prev_pt is not None:
+                                cv2.line(display_cam, prev_pt, pt, (255,200,0), 2)
+
+                            prev_pt = pt
+
+                    # --- Draw Route Direction Arrow ---
+                    if len(waypoint_data) >= 2:
+                        wp_x = waypoint_data[0] * 25.0
+                        wp_y = waypoint_data[1] * 25.0
+
+                        arrow_x = int(origin_x + wp_y * 8.0)
+                        arrow_y = int(origin_y - wp_x * 8.0)
+
+                        cv2.arrowedLine(display_cam,
+                                        (origin_x, origin_y),
+                                        (arrow_x, arrow_y),
+                                        (0,255,0),
+                                        2,
+                                        tipLength=0.3)
+
+                    # --- Draw speed indicator ---
+                    speed = stats.get("max_speed", 0)
+                    cv2.putText(display_cam,
+                                f"Speed: {speed:.1f} km/h",
+                                (10,30),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                (255,255,255),
+                                2)
+
                     cv2.imshow("Camera View", display_cam)
                 if state[1] is not None:
                     display_lidar = (state[1][:, :, 0] * 255).astype(np.uint8)
@@ -207,6 +277,11 @@ def main():
             if episode % 10 == 0:
                 actor.save_weights("echo_drive_actor.h5")
                 critic.save_weights("echo_drive_critic.h5")
+                try:
+                    with open("training_state.json", "w") as f:
+                        json.dump({"episode": episode, "epsilon": epsilon}, f)
+                except Exception as e:
+                    print(f"Failed to save training state: {e}")
                 print("Checkpoint Saved.")
 
             if stats.get("idle_steps", 0) >= 100:

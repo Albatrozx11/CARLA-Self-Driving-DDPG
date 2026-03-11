@@ -8,6 +8,9 @@ import platform
 import cv2
 import numpy as np
 from settings import Config
+
+from navigation.global_route_planner import GlobalRoutePlanner
+from navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 # --- 1. SETUP PATHS ---
 if platform.system() == "windows":
     egg_path = r"C:\Adithyan\CARLA_0.9.14\WindowsNoEditor\PythonAPI\carla\dist\carla-0.9.14-py3.7-win-amd64.egg"
@@ -44,6 +47,11 @@ class CarlaEnv:
         # Configuration
         self.n_vehicles = Config.N_VEHICLES  # Number of other cars
         self.n_walkers = Config.N_WALKERS    # Number of pedestrians
+        
+        # Route Planner
+        dao = GlobalRoutePlannerDAO(self.world.get_map(), sampling_resolution=2.0)
+        self.route_planner = GlobalRoutePlanner(dao)
+        self.route_planner.setup()
         
         # State Variables
         self.actor_list = []
@@ -120,13 +128,20 @@ class CarlaEnv:
             spawn_point = random.choice(spawn_points) 
             self.vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_point)
         
-        self.destination = random.choice(spawn_points).location
-        dist = math.sqrt((self.destination.x - spawn_point.location.x)**2 + (self.destination.y - spawn_point.location.y)**2)
-        
-        # Keep picking a new destination until it is at least 50 meters away
-        while dist < 50.0:
+        self.global_route = []
+        while len(self.global_route) < 10:
             self.destination = random.choice(spawn_points).location
             dist = math.sqrt((self.destination.x - spawn_point.location.x)**2 + (self.destination.y - spawn_point.location.y)**2)
+            
+            # Keep picking a new destination until it is at least 50 meters away
+            while dist < 50.0:
+                self.destination = random.choice(spawn_points).location
+                dist = math.sqrt((self.destination.x - spawn_point.location.x)**2 + (self.destination.y - spawn_point.location.y)**2)
+            
+            # Generate Global Route
+            self.global_route = self.route_planner.trace_route(spawn_point.location, self.destination)
+            
+        self.current_route_index = 0
         
         self.actor_list.append(self.vehicle)
         # self.vehicle.set_autopilot(False) # Removed to prevent RPC timeouts during resets
@@ -200,8 +215,9 @@ class CarlaEnv:
             
         if timeout_counter >= 50:
             print("WARNING: Sensors timed out during spawn. Forcing reset.")
+            return self.reset()
         
-        nav_vector, distance_to_goal, angle_diff, cte, is_off_road, _ = self._get_navigation()
+        nav_vector, distance_to_goal, angle_diff, cte, is_off_road, _, _ = self._get_navigation()
         self.last_distance = distance_to_goal  # <--- ADD THIS
         self.initial_distance = distance_to_goal
         
@@ -335,6 +351,16 @@ class CarlaEnv:
         
         valid_points = points[valid]
         
+        # --- NEW: Extract forward obstacle distance for DENSE REWARD ---
+        # Look specifically at points directly in the car's path (e.g. 1 meter left/right)
+        in_path = (valid_points[:, 1] > -1.0) & (valid_points[:, 1] < 1.0)
+        path_points = valid_points[in_path]
+        
+        if len(path_points) > 0:
+            self.stats["forward_obstacle_dist"] = float(np.min(path_points[:, 0]))
+        else:
+            self.stats["forward_obstacle_dist"] = float(lidar_range)
+        
         if len(valid_points) > 0:
             # Convert Real World Meters -> Image Pixels
             # X (Forward) maps to Y (0 is top, 80 is bottom). 
@@ -397,7 +423,7 @@ class CarlaEnv:
     
     # --- GNSS PROCESSING LOGIC ---
     def _get_navigation(self):
-        if not self.vehicle or not self.destination: return [0.0, 0.0, 0.0], 0.0, 0.0, 0.0, False
+        if not self.vehicle or not self.destination: return [0.0]*23, 0.0, 0.0, 0.0, False, "Unknown", []
         
         car_tf = self.vehicle.get_transform()
         dist = math.sqrt((self.destination.x - car_tf.location.x)**2 + (self.destination.y - car_tf.location.y)**2)
@@ -432,45 +458,125 @@ class CarlaEnv:
         # Get the projected driving waypoint for navigation so the AI always knows where it *should* be
         current_wp = carla_map.get_waypoint(car_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
         
-        # Calculate Cross-Track Error (CTE) -> How far is the car from the center of the lane?
+        # Calculate distance to nearest driving lane center (used only for off-road detection above)
         wp_loc = current_wp.transform.location
-        cte = math.sqrt((car_tf.location.x - wp_loc.x)**2 + (car_tf.location.y - wp_loc.y)**2)
+        wp_dist = math.sqrt((car_tf.location.x - wp_loc.x)**2 + (car_tf.location.y - wp_loc.y)**2)
         
-        next_wps = current_wp.next(10.0)
-        target_loc = next_wps[0].transform.location if next_wps else current_wp.transform.location
-
-        target_angle = math.degrees(math.atan2(target_loc.y - car_tf.location.y, target_loc.x - car_tf.location.x))
-        angle_diff = (target_angle - car_tf.rotation.yaw) % 360.0
-        if angle_diff > 180.0: angle_diff -= 360.0
-        
-        v = self.vehicle.get_velocity()
-        speed = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
-
-        # Generate 10 local waypoints ahead of the car
-        waypoints_local = []
-        wp = current_wp
+        # 1. Purge passed waypoints robustly
+        car_loc = car_tf.location
         f_vec = car_tf.get_forward_vector()
         r_vec = car_tf.get_right_vector()
         
-        for _ in range(10):
-            # Advance exactly 2.0 meters along the road logic
-            next_wps = wp.next(2.0)
-            if next_wps:
-                wp = next_wps[0]
+        while self.current_route_index < len(self.global_route) - 1:
+            wp_c = self.global_route[self.current_route_index][0]
+            wp_n = self.global_route[self.current_route_index + 1][0]
             
+            dx = wp_c.transform.location.x - car_loc.x
+            dy = wp_c.transform.location.y - car_loc.y
+            dot_forward = dx * f_vec.x + dy * f_vec.y
+            
+            d_curr = car_loc.distance(wp_c.transform.location)
+            d_next = car_loc.distance(wp_n.transform.location)
+            
+            # Move to next if the current one is behind us, OR if next is closer!
+            if dot_forward < -1.0 or d_next < d_curr:
+                self.current_route_index += 1
+            else:
+                break
+                
+        # 2. Generate exactly 10 points spaced by 2.0m using the Global Route as an anchor guide
+        waypoints_local = []
+        wp = current_wp # The physically closest Driving waypoint to car
+        anchor_idx = self.current_route_index
+        target_loc = car_loc
+        
+        for i in range(10):
+            next_wps = wp.next(2.0)
+            if not next_wps:
+                pass # Can't go further? Just repeat the last one
+            elif len(next_wps) == 1:
+                wp = next_wps[0]
+            else:
+                # Intersection! Use global_route to pick the right branch
+                lookahead_idx = min(anchor_idx + 20, len(self.global_route) - 1)
+                target_anchor = self.global_route[lookahead_idx][0]
+                
+                # Look ahead in the global route for an anchor point across the intersection
+                search_end = min(anchor_idx + 50, len(self.global_route))
+                for j in range(anchor_idx, search_end):
+                    candidate_wp = self.global_route[j][0]
+                    dist_to_cand = wp.transform.location.distance(candidate_wp.transform.location)
+                    if dist_to_cand > 5.0:
+                        target_anchor = candidate_wp
+                        anchor_idx = j
+                        break
+                
+                # Pick the branch that physically points toward target_anchor
+                best_dist = float('inf')
+                best_wp = next_wps[0]
+                for branch in next_wps:
+                    # Cast a ray 10 meters into the future along this branch
+                    branch_future = branch.next(10.0)
+                    eval_wp = branch_future[0] if branch_future else branch
+                    
+                    d = eval_wp.transform.location.distance(target_anchor.transform.location)
+                    if d < best_dist:
+                        best_dist = d
+                        best_wp = branch
+                wp = best_wp
+
+            if i == 0:
+                target_loc = wp.transform.location
+
             dx = wp.transform.location.x - car_tf.location.x
             dy = wp.transform.location.y - car_tf.location.y
+
+            
             
             # Convert to local coordinates relative to the car's hood
             local_x = dx * f_vec.x + dy * f_vec.y
             local_y = dx * r_vec.x + dy * r_vec.y
             
-            # Normalize reasonably (-1.0 to 1.0) using a 20m window
-            waypoints_local.extend([local_x / 20.0, local_y / 20.0])
+            # Normalize reasonably (-1.0 to 1.0) using a 25m window to avoid squash saturation
+            waypoints_local.extend([local_x / 25.0, local_y / 25.0])
 
-        nav_vector = [min(dist / 500.0, 1.0), angle_diff / 180.0, min(speed / 50.0, 1.0)] + waypoints_local
+        # --- Heading Alignment (used for reward only, NOT fed to the network) ---
+        next_idx = min(self.current_route_index + 5, len(self.global_route)-1)
+        future_wp = self.global_route[next_idx][0]
+        route_wp = self.global_route[self.current_route_index][0]
         
-        return nav_vector, dist, angle_diff, cte, is_off_road, off_road_lane_type
+        # Direction of the absolute route
+        route_dx = future_wp.transform.location.x - route_wp.transform.location.x
+        route_dy = future_wp.transform.location.y - route_wp.transform.location.y
+        mag = math.sqrt(route_dx**2 + route_dy**2)
+        
+        if mag > 0:
+            rx = route_dx / mag
+            ry = route_dy / mag
+        else:
+            rx, ry = f_vec.x, f_vec.y
+
+        # Heading Alignment (Dot Product) -> 1.0 is perfectly aligned
+        heading_alignment = f_vec.x * rx + f_vec.y * ry
+
+        # --- Route-Relative Signed Cross-Track Error ---
+        car_to_route_dx = car_loc.x - route_wp.transform.location.x
+        car_to_route_dy = car_loc.y - route_wp.transform.location.y
+        route_cte = rx * car_to_route_dy - ry * car_to_route_dx
+        route_cte_norm = max(-1.0, min(1.0, route_cte / 3.0))
+            
+        v = self.vehicle.get_velocity()
+        speed = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
+
+        # Build the nav vector: [dist, speed, route_cte] + 20 raw (x,y) waypoint coordinates = 23 elements
+        nav_vector = [
+            min(dist / 500.0, 1.0), 
+            min(speed / 50.0, 1.0),
+            route_cte_norm
+        ] + waypoints_local
+
+        # Return heading_alignment via the angle_diff slot so reward function can use it
+        return nav_vector, dist, heading_alignment, abs(route_cte), is_off_road, off_road_lane_type, waypoints_local
     
     # --- REWARD FUNCTION (New Seperate Function) ---
     def _calculate_reward(self, action):
@@ -479,8 +585,9 @@ class CarlaEnv:
         throttle = max(0.0, accel)
         brake = abs(min(0.0, accel))
         
-        nav_vector, distance, angle_diff, cte, is_off_road, off_road_lane_type = self._get_navigation()
-        norm_speed, angle_rad = nav_vector[2], math.radians(angle_diff)
+        nav_vector, distance, heading_alignment, cte, is_off_road, off_road_lane_type, wp_xy = self._get_navigation()
+        self.stats["waypoints_xy"] = wp_xy  # Send raw Cartesian targets to main.py for cv2.circle drawing
+        norm_speed = nav_vector[1]
 
         # 1. Catastrophic Failures
         if len(self.data['collision']) > 0:
@@ -501,11 +608,34 @@ class CarlaEnv:
             return reward, True, nav_vector
 
         # 2. Local & Global Progress
-        step_progress = (norm_speed * math.cos(angle_rad)) * Config.PROGRESS_REWARD_WEIGHT
+        step_progress = (norm_speed * heading_alignment) * Config.PROGRESS_REWARD_WEIGHT
         reward += step_progress
         self.last_distance = distance
         self.stats["total_progress_reward"] += step_progress
         self.stats["distance_to_goal"] = distance
+
+        # Direct speed bonus - always reward ANY forward movement to prevent idle collapse
+        #reward += norm_speed * 1.0
+        
+        # --- NEW: DENSE OBSTACLE AVOIDANCE REWARD ---
+        # If an obstacle is directly in front of us, penalize high speeds!
+        min_dist = self.stats.get("forward_obstacle_dist", Config.LIDAR_RANGE)
+        danger_zone = 7.0 # meters
+        
+        if min_dist < danger_zone:
+            # The closer the object, the higher the danger multiplier (0.0 to 1.0)
+            danger_multiplier = 1.0 - (min_dist / danger_zone)
+            # The faster we are going, the harder we are penalized.
+            # If we are stopped (norm_speed = 0), penalty is 0, which teaches the AI TO STOP!
+            proximity_penalty = danger_multiplier * norm_speed * 10.0
+            reward -= proximity_penalty
+            self.stats["proximity_penalty"] = proximity_penalty
+        else:
+            self.stats["proximity_penalty"] = 0.0
+
+        # Optional: Extra bonus for applying brakes when an object is close
+        if min_dist < danger_zone and brake > 0.1:
+            reward += brake * danger_multiplier * 2.0
         
         # 3. Lane Centering Penalty (Cross-Track Error)
         # Penalize the agent the further it gets from the center of the lane
@@ -551,13 +681,8 @@ class CarlaEnv:
         if abs(steer) > 0.3 and norm_speed < 0.2:
             reward -= 2.0  # Flat penalty for doing low-speed donuts
             
-        # Optional: Bonus for driving perfectly straight
-        if abs(steer) < 0.05:
-            reward += 0.5
-            
         # Penalize braking when going fast
         reward += (brake * norm_speed) * Config.REWARD_HARD_BREAK
-        
 
         return reward, False, nav_vector
 
@@ -606,7 +731,7 @@ class CarlaEnv:
         # UPDATE STATS
         self.stats["step_count"] += 1
         self.stats["total_reward"] += reward
-        current_speed = nav_vector[2] * 50 # Convert normalized back to km/h
+        current_speed = nav_vector[1] * 50 # Convert normalized back to km/h
         if current_speed > self.stats["max_speed"]:
             self.stats["max_speed"] = current_speed
             
