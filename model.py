@@ -1,7 +1,7 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Conv2D, Flatten, Input, Dense, Concatenate
 
-def create_actor(img_shape=(80, 80, 1), vec_shape=(29,)):
+def create_actor(img_shape=(80, 80, 1), lidar_shape=(32,), vec_shape=(29,)):
     # --- Head 1: Camera (RGB/Gray) ---
     cam_input = Input(shape=img_shape, name="cam_input")
     x = Conv2D(32, 5, strides=2, activation="relu")(cam_input)
@@ -9,12 +9,9 @@ def create_actor(img_shape=(80, 80, 1), vec_shape=(29,)):
     x = Flatten()(x)
     x = Dense(128, activation="relu")(x) # Condense camera features
 
-    # --- Head 2: LiDAR (Top-down view) ---
-    lidar_input = Input(shape=img_shape, name="lidar_input")
-    z = Conv2D(32, 5, strides=2, activation="relu")(lidar_input)
-    z = Conv2D(64, 3, strides=2, activation="relu")(z)
-    z = Flatten()(z)
-    z = Dense(128, activation="relu")(z) # Condense LiDAR features
+    # --- Head 2: LiDAR (1D Polar Bins) ---
+    lidar_input = Input(shape=lidar_shape, name="lidar_input")
+    z = Dense(64, activation="relu")(lidar_input) # Condense LiDAR collision sensors
 
     # Physics processing
     vec_input = Input(shape=vec_shape)
@@ -36,10 +33,10 @@ def create_actor(img_shape=(80, 80, 1), vec_shape=(29,)):
     
     return tf.keras.Model(inputs=[cam_input, lidar_input, vec_input], outputs=outputs)
 
-def create_critic(img_shape=(80, 80, 1), vec_shape=(29,), action_shape=(2,)):
+def create_critic(img_shape=(80, 80, 1), lidar_shape=(32,), vec_shape=(29,), action_shape=(2,)):
     # Inputs
     cam_input = Input(shape=img_shape, name="cam_input")
-    lidar_input = Input(shape=img_shape, name="lidar_input")
+    lidar_input = Input(shape=lidar_shape, name="lidar_input")
     vec_input = Input(shape=vec_shape, name="vec_input")
     action_input = Input(shape=action_shape, name="action_input")
 
@@ -49,11 +46,8 @@ def create_critic(img_shape=(80, 80, 1), vec_shape=(29,), action_shape=(2,)):
     x = Flatten()(x)
     x = Dense(128, activation="relu")(x) # Condense camera features
 
-    # LiDAR Branch
-    z = Conv2D(32, 5, strides=2, activation="relu")(lidar_input)
-    z = Conv2D(64, 3, strides=2, activation="relu")(z) # Match Actor depth
-    z = Flatten()(z)
-    z = Dense(128, activation="relu")(z) # Condense LiDAR features
+    # LiDAR Branch (1D Polar Bins)
+    z = Dense(64, activation="relu")(lidar_input) # Condense LiDAR collision sensors
 
     # Physics Branch
     y = Dense(32, activation="relu")(vec_input)

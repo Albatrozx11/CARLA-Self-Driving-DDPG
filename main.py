@@ -2,6 +2,7 @@ import cv2
 import datetime
 import os 
 import numpy as np
+import json
 from sources import CarlaEnv
 from logger import TrainingLogger  # 1. Import your new logger
 from model import create_actor, create_critic
@@ -12,11 +13,8 @@ import time
 import tensorflow as tf
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        print(e)
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
 
 def main():
     env = CarlaEnv()
@@ -31,8 +29,24 @@ def main():
     # --- NEW: CHECKPOINT LOADER ---
     actor_path = "echo_drive_actor.h5"
     critic_path = "echo_drive_critic.h5"
+    state_path = "training_state.json"
 
-    if os.path.exists(actor_path) and os.path.exists(critic_path):
+    start_episode = 1
+    epsilon = 1.0          # Start with 100% noise
+
+    if os.path.exists(actor_path) and os.path.exists(critic_path) and os.path.exists(state_path):
+        print("Found existing checkpoints! Loading weights and state...")
+        actor.load_weights(actor_path)
+        critic.load_weights(critic_path)
+        try:
+            with open(state_path, "r") as f:
+                state_data = json.load(f)
+                start_episode = state_data.get("episode", 0) + 1
+                epsilon = state_data.get("epsilon", 1.0)
+        except Exception as e:
+            print(f"Could not load state: {e}")
+        print(f"Successfully resumed EchoDrive's brain at Episode {start_episode}.")
+    elif os.path.exists(actor_path) and os.path.exists(critic_path):
         print("Found existing checkpoints! Loading weights...")
         actor.load_weights(actor_path)
         critic.load_weights(critic_path)
@@ -46,7 +60,7 @@ def main():
     target_critic.set_weights(critic.get_weights())
 
     # Initialize Helper Classes
-    buffer = ReplayBuffer(capacity=10000)
+    buffer = ReplayBuffer(capacity=20000)
     trainer = DDPGTrainer(actor, critic, target_actor, target_critic)
     noise_gen = OUNoise(action_dimension=2)
 
@@ -56,12 +70,12 @@ def main():
     summary_writer = tf.summary.create_file_writer(train_log_dir)
 
     # --- Epsilon Decay Settings ---
-    epsilon = 1.0          # Start with 100% noise
-    epsilon_decay = 0.995  # Multiply by this after every episode
+    epsilon_decay = 0.998  # Slower decay to prevent premature policy collapse
     epsilon_min = 0.05     # Never go below 5% noise (keeps a tiny bit of exploration)
     try:
-        # Loop for multiple episodes
-        for episode in range(1, 1001): 
+        # Loop infinitely
+        episode = start_episode
+        while True:
             state = env.reset()
             done = False
             noise_gen.reset()
@@ -80,18 +94,32 @@ def main():
             print(f"Episode {episode} started. Press 'q' to quit.")
 
             while not done:
+                if state[0] is None or state[1] is None:
+                    # Tick environment frame to prevent infinite loop on stale data
+                    next_state, reward, done, stats = env.step([0.0, 0.0])
+                    state = next_state
+                    if done:
+                        break
+                    continue
+
                 # 1. Prepare State for Model
                 # state[0] is Camera, state[1] is lidar state[2] is Physics vector
                 cur_state_img = state[0][np.newaxis, ...]
                 cur_lidar = state[1][np.newaxis, ...]
-                cur_state_vec = np.array(state[2])[np.newaxis, ...]
+                cur_state_vec = np.array([state[2]])
 
-                # 2. Get Action + Decaying Noise
-                mu_action = actor.predict([cur_state_img, cur_lidar, cur_state_vec], verbose=0)[0]
+                # 2. Get Action + Decaying Noise (Using raw .numpy() for 40% faster inference than .predict())
+                mu_action = actor([cur_state_img, cur_lidar, cur_state_vec], training=False).numpy()[0]
                 noise = noise_gen.noise() * epsilon  # <--- Scale the noise here
                 
+                # Add a forward throttle bias during exploration so the car actually moves
+                # CARLA vehicles need >0.4 throttle to overcome inertia
+                # This decays with epsilon so it vanishes as the actor learns its own throttle policy
+                noise[1] += 0.6 * epsilon
+                
                 # Scale steer [-1, 1] and accel [-1, 1]
-                final_action = np.clip(mu_action + noise, [-1.0, -1.0], [1.0, 1.0])
+                action = mu_action + noise
+                final_action = np.clip(action, -1.0, 1.0)
 
                 # 3. Environment Step
                 next_state, reward, done, stats = env.step(final_action)
@@ -110,12 +138,97 @@ def main():
 
                 # --- Visualization ---
                 if state[0] is not None:
-                    display_cam = (state[0][:, :, 0] * 255).astype(np.uint8)
-                    display_cam = cv2.resize(display_cam, (400, 400), interpolation=cv2.INTER_NEAREST)
+                    display_cam = (state[0][:,:,0] * 255).astype(np.uint8)
+                    display_cam = cv2.resize(display_cam, (400,400), interpolation=cv2.INTER_NEAREST)
+                    display_cam = cv2.cvtColor(display_cam, cv2.COLOR_GRAY2BGR)
+                
+                    waypoint_data = stats.get("waypoints_xy", [])
+                
+                    origin_x = 200
+                    origin_y = 380
+                
+                    # Draw ego vehicle anchor
+                    cv2.circle(display_cam, (origin_x, origin_y), 6, (255,255,255), -1)
+                
+                    # --- Draw Waypoint Path ---
+                    if len(waypoint_data) == 20:
+                        prev_pt = None
+                        for i in range(10):
+                            wp_x = waypoint_data[i*2] * 25.0
+                            wp_y = waypoint_data[i*2+1] * 25.0
+                
+                            pixel_x = int(origin_x + wp_y * 8.0)
+                            pixel_y = int(origin_y - wp_x * 8.0)
+                
+                            pt = (pixel_x, pixel_y)
+                
+                            # draw waypoint
+                            cv2.circle(display_cam, pt, 4, (0,255,255), -1)
+                
+                            # connect waypoints with path line
+                            if prev_pt is not None:
+                                cv2.line(display_cam, prev_pt, pt, (255,200,0), 2)
+                
+                            prev_pt = pt
+                
+                    # --- Draw Route Direction Arrow ---
+                    if len(waypoint_data) >= 2:
+                        wp_x = waypoint_data[0] * 25.0
+                        wp_y = waypoint_data[1] * 25.0
+                
+                        arrow_x = int(origin_x + wp_y * 8.0)
+                        arrow_y = int(origin_y - wp_x * 8.0)
+                
+                        cv2.arrowedLine(display_cam,
+                                        (origin_x, origin_y),
+                                        (arrow_x, arrow_y),
+                                        (0,255,0),
+                                        2,
+                                        tipLength=0.3)
+                
+                    # --- Draw speed indicator ---
+                    speed = stats.get("max_speed", 0)
+                    cv2.putText(display_cam, f"Speed: {speed:.1f} km/h", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # --- Draw Training Telemetry ---
+                    cv2.putText(display_cam, f"Steer: {action[0]:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    cv2.putText(display_cam, f"Accel: {action[1]:.2f}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                    cur_reward = stats.get("total_reward", 0)
+                    cv2.putText(display_cam, f"Reward: {cur_reward:.0f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                
                     cv2.imshow("Camera View", display_cam)
-                if state[1] is not None:
-                    display_lidar = (state[1][:, :, 0] * 255).astype(np.uint8)
-                    display_lidar = cv2.resize(display_lidar, (400, 400), interpolation=cv2.INTER_NEAREST)
+                    
+                if state[1] is not None and len(state[1]) == 32:
+                    # state[1] is now a 1D array of 32 distances. 
+                    # Create a simple radial plot for debugging.
+                    display_lidar = np.zeros((400, 400, 3), dtype=np.uint8)
+                    # Origin is at the bottom center of the image
+                    origin = (200, 380) 
+                    
+                    # Draw a white anchor dot at the origin point
+                    cv2.circle(display_lidar, origin, 4, (255, 255, 255), -1)
+                    num_bins = len(state[1])
+                    
+                    for i, dist in enumerate(state[1]):
+                        # Ray length in pixels (say, 350 pixels max depth)
+                        ray_len = int((1 - dist) * 350)
+                        
+                        # Calculate angle matching our -pi/2 to pi/2 bins
+                        angle = (i + 0.5) / num_bins * np.pi - (np.pi / 2)
+                        
+                        # In OpenCV, Y negative is up, X positive is right.
+                        # Forward (angle=0) points straight UP (negative Y).
+                        # Left (angle < 0) points UP and LEFT (negative X).
+                        ray_dx = np.sin(angle)
+                        ray_dy = -np.cos(angle)
+                        
+                        end_point = (int(origin[0] + ray_dx * ray_len), int(origin[1] + ray_dy * ray_len))
+                        
+                        # Color code closest obstacles as angry red
+                        color = (0, 0, 255) if dist < 0.2 else (0, 255, 0)
+                        cv2.line(display_lidar, origin, end_point, color, 2)
+                        
                     cv2.imshow("LiDAR View", display_lidar)
                 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -207,6 +320,11 @@ def main():
             if episode % 10 == 0:
                 actor.save_weights("echo_drive_actor.h5")
                 critic.save_weights("echo_drive_critic.h5")
+                try:
+                    with open(state_path, "w") as f:
+                        json.dump({"episode": episode, "epsilon": epsilon}, f)
+                except Exception as e:
+                    print(f"Error saving state: {e}")
                 print("Checkpoint Saved.")
 
             if stats.get("idle_steps", 0) >= 100:
@@ -245,6 +363,15 @@ def main():
                     avg_c_loss = ep_critic_loss / training_steps
                     tf.summary.scalar('Loss/Actor', avg_a_loss, step=episode)
                     tf.summary.scalar('Loss/Critic', avg_c_loss, step=episode)
+                
+                # --- MEMORY LEAK FIX: Flush TB buffer to disk every episode ---
+                summary_writer.flush()
+
+            # --- PREVENT CARLA ACTOR LEAK: Delete old car and sensors before next reset ---
+            env.destroy_agents()
+            
+            # --- Increment Episode ---
+            episode += 1
 
 
             

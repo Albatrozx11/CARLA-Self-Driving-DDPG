@@ -11,20 +11,21 @@ class DDPGTrainer:
         
         self.gamma = gamma
         self.tau = tau
-        
-        self.actor_optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
-        self.critic_optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+        self.actor_optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001, clipnorm=1.0)
+        self.critic_optimizer = tf.keras.optimizers.Adam(learning_rate=0.001, clipnorm=1.0)
 
-    @tf.function
     def update(self, states, actions, rewards, next_states, dones):
         # --- PRE-CALCULATE TARGETS OUTSIDE THE TAPE ---
-        # We set training=False because we DO NOT want to track gradients for target networks
         target_actions = self.target_actor(next_states, training=False)
-        y = rewards + self.gamma * self.target_critic(next_states + [target_actions], training=False) * (1 - dones)
+        target_q = self.target_critic(next_states + [target_actions], training=False)
+        y = rewards + self.gamma * tf.stop_gradient(target_q) * (1 - dones)
+        
+        # Clip Q-targets to prevent early training Critic explosion spikes 
+        # (Bounded to match max terminal rewards in settings.py: -300 collision/idle, +200 goal)
+        y = tf.clip_by_value(y, -300.0, 300.0)
 
         # --- 1. Update Critic ---
         with tf.GradientTape() as tape:
-            # ONLY track the live critic network inside the tape
             critic_value = self.critic(states + [actions], training=True)
             critic_loss = tf.math.reduce_mean(tf.math.square(y - critic_value))
 
@@ -34,12 +35,12 @@ class DDPGTrainer:
         # --- 2. Update Actor ---
         with tf.GradientTape() as tape:
             new_actions = self.actor(states, training=True)
-            # We want to MAXIMIZE Q, so we MINIMIZE negative Q
             actor_loss = -tf.math.reduce_mean(self.critic(states + [new_actions], training=True))
 
         actor_grad = tape.gradient(actor_loss, self.actor.trainable_variables)
         self.actor_optimizer.apply_gradients(zip(actor_grad, self.actor.trainable_variables))
 
+        # Soft-update target networks every step
         self.update_targets()
 
         return actor_loss, critic_loss
@@ -53,18 +54,18 @@ class DDPGTrainer:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity, img_shape=(80, 80, 1), vec_shape=(29,)):
+    def __init__(self, capacity, img_shape=(80, 80, 1), lidar_shape=(32,), vec_shape=(29,)):
         self.capacity = capacity
         self.ptr = 0
         self.size = 0
 
         # Pre-allocate memory for both Camera and LiDAR images
         self.state_cam = np.zeros((capacity, *img_shape), dtype=np.float32)
-        self.state_lidar = np.zeros((capacity, *img_shape), dtype=np.float32)
+        self.state_lidar = np.zeros((capacity, *lidar_shape), dtype=np.float32)
         self.state_vec = np.zeros((capacity, *vec_shape), dtype=np.float32)
 
         self.next_state_cam = np.zeros((capacity, *img_shape), dtype=np.float32)
-        self.next_state_lidar = np.zeros((capacity, *img_shape), dtype=np.float32)
+        self.next_state_lidar = np.zeros((capacity, *lidar_shape), dtype=np.float32)
         self.next_state_vec = np.zeros((capacity, *vec_shape), dtype=np.float32)
 
         self.actions = np.zeros((capacity, 2), dtype=np.float32)
