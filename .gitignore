@@ -23,7 +23,7 @@ wheels/
 # Ignore TensorBoard and training logs
 logs/
 training_logs.csv
-
+evaluation_logs.csv
 # Ignore specific environment and compiler binaries
 carla_sim/
 libdevice.10.bc
