@@ -1,103 +1,75 @@
-# EchoDrive – CARLA Self-Driving Car using DDPG
+# EchoDrive – Autonomous Driving using Deep Reinforcement Learning
 
-## Overview
+<p align="center">
+  <img src="assets/banner.png" width="100%"/>
+</p>
 
-EchoDrive is a Deep Reinforcement Learning based autonomous driving system built using the CARLA Simulator and the Deep Deterministic Policy Gradient (DDPG) algorithm.
-
-The project focuses on training a self-driving agent capable of:
-
-- Lane following
-- Obstacle avoidance
-- Safe navigation
-- Continuous steering and acceleration control
-- Generalization to unseen environments
-
-Unlike traditional DQN-based approaches that work with discrete actions, EchoDrive uses DDPG to operate in a continuous action space, making it more suitable for real-world autonomous driving control.
-
-The system combines multiple sensors including:
-
-- RGB Camera
-- LiDAR
-- IMU
-- GNSS / Navigation features
-
-The trained agent learns directly through interaction with the CARLA environment.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10-blue"/>
+  <img src="https://img.shields.io/badge/TensorFlow-2.x-orange"/>
+  <img src="https://img.shields.io/badge/CARLA-0.9.15-green"/>
+  <img src="https://img.shields.io/badge/Reinforcement%20Learning-DDPG-red"/>
+</p>
 
 ---
 
-## Features
+# Overview
+
+EchoDrive is a Deep Reinforcement Learning based autonomous driving system built using the CARLA Simulator and the Deep Deterministic Policy Gradient (DDPG) algorithm.
+
+The project focuses on training an autonomous vehicle capable of:
+
+- Lane following
+- Obstacle avoidance
+- Continuous steering and throttle control
+- Navigation in dynamic environments
+- Generalization to unseen driving scenarios
+
+Unlike DQN-based approaches that rely on discrete actions, EchoDrive uses DDPG to operate in a continuous action space, making it more suitable for realistic autonomous vehicle control.
+
+---
+
+# Demo
+
+## Autonomous Driving in CARLA
+
+<p align="center">
+  <img src="assets/demo.gif" width="850"/>
+</p>
+
+---
+
+# Key Features
 
 - End-to-end autonomous driving in CARLA
 - Deep Reinforcement Learning using DDPG
 - Multi-modal sensor fusion
-- Continuous steering and acceleration control
-- Dynamic traffic and pedestrian simulation
-- Randomized weather conditions
-- A* based route planning
-- Replay buffer based off-policy training
-- Lane invasion and collision monitoring
-- Zero-shot testing on unseen CARLA towns
+- Continuous action control
+- Dynamic traffic simulation
+- Randomized weather environments
+- A* route planning
+- Lane invasion monitoring
+- Collision handling system
+- Zero-shot evaluation in unseen towns
 
 ---
 
 # System Architecture
 
-The project follows an Actor–Critic Reinforcement Learning architecture.
+<p align="center">
+  <img src="assets/architecture.png" width="900"/>
+</p>
 
-## Main Components
+## Pipeline
 
-### 1. Simulation Environment
-
-CARLA provides:
-
-- Urban roads
-- Dynamic traffic
-- Pedestrians
-- Weather conditions
-- Vehicle physics
-
-### 2. Perception Pipeline
-
-Sensor data is collected and processed from:
-
-- RGB Camera
-- LiDAR
-- IMU
-- Navigation vectors
-
-### 3. State Representation
-
-The final state consists of:
-
-- Grayscale image tensor `(80 × 80 × 1)`
-- LiDAR polar obstacle vector `(32)`
-- Navigation + IMU vector `(29)`
-
-### 4. DDPG Agent
-
-The DDPG agent contains:
-
-#### Actor Network
-
-Predicts:
-
-- Steering
-- Acceleration
-
-#### Critic Network
-
-Evaluates:
-
-- State-action quality (Q-value)
-
-### 5. Reward Function
-
-The reward function encourages:
-
-- Lane keeping
-- Progress toward destination
-- Smooth steering
-- Collision avoidance
+1. CARLA environment generates simulation state
+2. Sensors collect environmental data
+3. State vector is constructed
+4. Actor network predicts actions
+5. Vehicle executes steering/throttle
+6. Critic network evaluates action quality
+7. Replay buffer stores transitions
+8. Networks update using DDPG
 
 ---
 
@@ -106,44 +78,121 @@ The reward function encourages:
 | Component | Technology |
 |---|---|
 | Simulator | CARLA |
-| Game Engine | Unreal Engine |
 | RL Algorithm | DDPG |
-| Language | Python |
 | Deep Learning | TensorFlow |
-| Data Processing | NumPy, Pandas |
+| Language | Python |
 | Visualization | Matplotlib |
+| Route Planning | A* Planner |
+| Environment | Unreal Engine |
 
 ---
 
-# Hardware Requirements
+# State Representation
 
-## Minimum
+The agent uses a multi-modal observation space:
 
-- Quad-core CPU
-- 8 GB RAM
-- GPU support recommended
+```text
+State =
+{
+    Grayscale Image Tensor (80 × 80 × 1)
+    LiDAR Polar Vector (32)
+    Navigation + IMU Vector (29)
+}
+```
 
-## Recommended
-
-- NVIDIA GPU with 8 GB VRAM
-- 16 GB RAM
-- CUDA support
+This allows the model to jointly reason about:
+- Vision
+- Obstacles
+- Vehicle dynamics
+- Route planning
 
 ---
 
-# Software Requirements
+# Sensor Pipeline
 
-- Python 3.8+
-- TensorFlow 2+
-- CARLA 0.9.x
-- CUDA Toolkit (recommended)
-- NVIDIA Drivers
+## RGB Camera
+
+- Resolution: `128 × 128`
+- Grayscale conversion
+- Resized to `80 × 80`
+- Normalized to `[0,1]`
+
+<p align="center">
+  <img src="assets/camera_feed.png" width="650"/>
+</p>
+
+---
+
+## LiDAR
+
+- Front 180° obstacle scanning
+- Encoded into 32 angular sectors
+- Nearest obstacle distance extraction
+
+<p align="center">
+  <img src="assets/lidar.png" width="650"/>
+</p>
+
+---
+
+## IMU + Navigation Features
+
+Includes:
+- Speed
+- Gyroscope data
+- Distance to destination
+- Cross-track error
+- Future waypoint vectors
+
+---
+
+# Reinforcement Learning Architecture
+
+## Actor Network
+
+### Inputs
+- Camera tensor
+- LiDAR vector
+- Navigation features
+
+### Outputs
+- Steering
+- Acceleration
+
+---
+
+## Critic Network
+
+### Inputs
+- State
+- Action
+
+### Output
+- Q-value estimation
+
+---
+
+# Reward Function
+
+The reward function encourages:
+
+- Lane discipline
+- Goal progression
+- Smooth steering
+- Collision avoidance
+- Stable driving behavior
+
+Penalties are applied for:
+
+- Collisions
+- Lane invasions
+- Excessive steering oscillations
 
 ---
 
 # Installation
 
-## 1. Clone the Repository
+## Clone Repository
 
 ```bash
 git clone https://github.com/Albatrozx11/CARLA-Self-Driving-DDPG.git
@@ -152,7 +201,7 @@ cd CARLA-Self-Driving-DDPG
 
 ---
 
-## 2. Create Virtual Environment
+## Create Virtual Environment
 
 ### Windows
 
@@ -170,7 +219,7 @@ source venv/bin/activate
 
 ---
 
-## 3. Install Dependencies
+## Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -180,32 +229,16 @@ pip install -r requirements.txt
 
 # Installing CARLA
 
-## Download CARLA
-
-Download CARLA 0.9.x from:
+Download CARLA 0.9.x:
 
 - https://carla.org/
 - https://github.com/carla-simulator/carla/releases
 
 ---
 
-## Extract CARLA
+# Running the Project
 
-Example:
-
-```bash
-C:\CARLA_0.9.15
-```
-
-or
-
-```bash
-~/CARLA_0.9.15
-```
-
----
-
-## Launch CARLA
+## Step 1 — Start CARLA
 
 ### Windows
 
@@ -221,48 +254,31 @@ CarlaUE4.exe
 
 ---
 
-# Running the Project
-
-## Step 1 — Start CARLA Simulator
-
-Launch CARLA before running the training script.
-
-Example:
-
-```bash
-./CarlaUE4.sh
-```
-
----
-
-## Step 2 — Run Training
+## Step 2 — Train Agent
 
 ```bash
 python train.py
 ```
 
-The training pipeline:
-
-- Initializes the CARLA environment
-- Spawns traffic and pedestrians
-- Attaches sensors
-- Generates routes
-- Collects experiences
-- Updates Actor and Critic networks
+Training includes:
+- Traffic generation
+- Pedestrian spawning
+- Sensor attachment
+- Replay buffer updates
+- Actor-Critic optimization
 
 ---
 
-## Step 3 — Evaluate Trained Model
+## Step 3 — Evaluate Model
 
 ```bash
 python evaluate.py
 ```
 
-Evaluation is performed in:
-
-- Unseen towns
+Evaluation is performed under:
 - Random weather
-- Random traffic conditions
+- Dynamic traffic
+- Unseen CARLA towns
 
 ---
 
@@ -279,233 +295,71 @@ CARLA-Self-Driving-DDPG/
 ├── utils/
 ├── logs/
 ├── checkpoints/
-├── requirements.txt
+├── assets/
 └── README.md
 ```
 
 ---
 
-# Sensor Pipeline
+# Training Performance
 
-## RGB Camera
+## Reward Curve
 
-- Resolution: `128 × 128`
-- Converted to grayscale
-- Resized to `80 × 80`
-- Normalized to `[0,1]`
+<p align="center">
+  <img src="assets/reward_curve.png" width="750"/>
+</p>
 
-## LiDAR
-
-- Front 180° view
-- Encoded into 32 angular bins
-- Stores nearest obstacle distances
-
-## IMU
-
-Captures:
-
-- Acceleration
-- Gyroscope data
-
-## Navigation Features
-
-Includes:
-
-- Distance to goal
-- Speed
-- Cross-track error
-- Future waypoints
+The reward trend demonstrates stable convergence and progressive learning over training episodes.
 
 ---
 
-# Reinforcement Learning Pipeline
+## Collision Reduction
 
-## Replay Buffer
+<p align="center">
+  <img src="assets/collision_graph.png" width="750"/>
+</p>
 
-Stores:
-
-- State
-- Action
-- Reward
-- Next State
-
-## Training Loop
-
-1. Observe environment
-2. Predict action using Actor
-3. Execute action in CARLA
-4. Receive reward
-5. Store transition
-6. Update Actor and Critic networks
+Collision frequency consistently decreased as training progressed.
 
 ---
 
-# Neural Network Architecture
+## Lane Invasion Reduction
 
-## Actor Network
+<p align="center">
+  <img src="assets/lane_invasion_graph.png" width="750"/>
+</p>
 
-### Inputs
-
-- Camera tensor
-- LiDAR vector
-- Navigation/Physics vector
-
-### Outputs
-
-- Steering
-- Acceleration
-
-### Layers
-
-- CNN layers for visual features
-- Dense layers for sensor fusion
-- Fully connected layers for control prediction
-
----
-
-## Critic Network
-
-### Inputs
-
-- State
-- Action
-
-### Output
-
-- Q-value
-
-### Purpose
-
-Evaluates how good an action is in a given state.
-
----
-
-# Training Strategy
-
-The model is trained in a randomized CARLA environment with:
-
-- Dynamic traffic
-- Pedestrians
-- Multiple weather conditions
-- Random spawn locations
-
-To improve throughput:
-
-- Synchronous simulation is used
-- Rendering can be disabled during training
-
-The reward function combines:
-
-- Goal progress
-- Lane discipline
-- Collision penalties
-- Steering smoothness
+The agent learned stable lane-following behavior with reduced lane deviations.
 
 ---
 
 # Results
 
-## Training Results
+## Quantitative Results
 
-The DDPG agent successfully learned:
-
-- Lane following
-- Smooth steering control
-- Collision avoidance
-- Navigation toward target waypoints
-
-The model showed improved stability over training episodes through:
-
-- Reduced collision frequency
-- Reduced lane invasions
-- Smoother control outputs
-- Better trajectory adherence
+| Metric | Result |
+|---|---|
+| Training Episodes | 500+ |
+| Collision Reduction | 35% |
+| Tested Towns | 3+ |
+| Action Space | Continuous |
+| Sensors Used | RGB + LiDAR + IMU |
+| RL Algorithm | DDPG |
 
 ---
 
-## Robustness Testing
+## Generalization Testing
 
-The trained agent was evaluated in:
-
-- Completely unseen CARLA towns
-- Randomized weather conditions
+The trained model was evaluated in:
+- Unseen CARLA towns
 - Dynamic traffic environments
+- Randomized weather conditions
 
-The testing was performed without any additional fine-tuning.
-
-This demonstrated:
-
-- Generalization capability
-- Adaptive driving behavior
-- Reduced overfitting to training routes
-
----
-
-## Key Evaluation Metrics
-
-- Episode reward trends
-- Collision count
-- Lane invasion frequency
-- Driving smoothness
-- Route completion consistency
-
----
-
-# State Representation
-
-The final multi-modal observation space:
-
-```text
-State =
-{
-    Grayscale Image Tensor (80 × 80 × 1)
-    LiDAR Polar Vector (32)
-    Navigation + IMU Vector (29)
-}
-```
-
-This allows the model to jointly reason about:
-
-- Visual scene understanding
-- Obstacle proximity
-- Vehicle dynamics
-- Route planning
-
----
-
-# Algorithms Used
-
-## Route Planning
-
-- A* Global Route Planner
-
-## Reinforcement Learning
-
-- Deep Deterministic Policy Gradient (DDPG)
-
-## Sensor Processing
-
-- Polar LiDAR encoding
-- Image normalization
-- IMU feature encoding
-
----
-
-# Testing Strategy
-
-The trained model was tested using:
-
-- Zero-shot deployment
-- Unseen maps
-- No additional training
-
-Performance was monitored using:
-
-- Collision events
-- Lane invasions
-- Reward consistency
-
-This ensured the agent learned generalized driving policies instead of memorizing routes.
+The agent successfully demonstrated:
+- Robust lane following
+- Smooth steering
+- Adaptive obstacle avoidance
+- Zero-shot generalization
 
 ---
 
@@ -516,8 +370,8 @@ This project demonstrates:
 - End-to-end autonomous driving using DDPG
 - Multi-modal sensor fusion in CARLA
 - Continuous control for autonomous navigation
-- Generalization testing in unseen environments
-- Robust RL training using randomized simulation conditions
+- Robust RL training under randomized environments
+- Zero-shot testing on unseen maps
 
 ---
 
@@ -527,31 +381,10 @@ Planned future work includes:
 
 - TD3 implementation
 - TCAMD architecture integration
-- Multi-agent traffic learning
-- Attention mechanisms
-- Improved reward shaping
-- Sim-to-real transfer learning
-- Transformer-based perception models
-
----
-
-# Literature Inspiration
-
-The project was inspired by multiple research works in:
-
-- DDPG autonomous driving
-- CARLA-based RL systems
 - Multi-agent reinforcement learning
-- Traffic randomization
-- Sensor fusion
-- TD3 and TCAMD architectures
-
-Key ideas adopted include:
-
-- Continuous action control
-- Randomized environments
-- Multi-modal perception
-- Robust reward engineering
+- Transformer-based perception
+- Sim-to-real transfer learning
+- Attention mechanisms
 
 ---
 
@@ -560,13 +393,12 @@ Key ideas adopted include:
 1. CARLA Simulator  
    https://carla.org/
 
-2. Deep Deterministic Policy Gradient (DDPG)  
-   Lillicrap et al.
+2. Lillicrap et al. — Deep Deterministic Policy Gradient (DDPG)
 
 3. TensorFlow Documentation  
    https://www.tensorflow.org/
 
-4. Reinforcement Learning for Autonomous Driving Research Papers
+4. Research papers on RL for Autonomous Driving
 
 ---
 
@@ -574,7 +406,7 @@ Key ideas adopted include:
 
 ```bibtex
 @project{echodrive2026,
-  title={EchoDrive: CARLA Self-Driving using DDPG},
+  title={EchoDrive: Autonomous Driving using Deep Reinforcement Learning},
   author={Adithyan A and Ann Mariyam Prakash and Karthik Manoj and Sachin Umendran},
   year={2026},
   institution={Model Engineering College}
@@ -591,7 +423,6 @@ Key ideas adopted include:
 - Sachin Umendran
 
 Guide:
-
 - Ms. Aysha Fymin Majeed
 
 Department of Computer Science Engineering  
