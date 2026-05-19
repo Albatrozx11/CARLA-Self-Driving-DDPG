@@ -15,41 +15,40 @@
 
 # Overview
 
-EchoDrive is a Deep Reinforcement Learning based autonomous driving system built using the CARLA Simulator and the Deep Deterministic Policy Gradient (DDPG) algorithm.
+EchoDrive is an autonomous driving system built using Deep Reinforcement Learning in the CARLA Simulator.  
+The project uses the Deep Deterministic Policy Gradient (DDPG) algorithm to train an autonomous vehicle capable of continuous steering and throttle control in dynamic driving environments.
 
-The project focuses on training an autonomous vehicle capable of:
+The system performs:
 
 - Lane following
 - Obstacle avoidance
-- Continuous steering and throttle control
-- Navigation in dynamic environments
-- Generalization to unseen driving scenarios
+- Continuous vehicle control
+- Navigation in dynamic traffic
+- Zero-shot generalization to unseen environments
 
-Unlike DQN-based approaches that rely on discrete actions, EchoDrive uses DDPG to operate in a continuous action space, making it more suitable for realistic autonomous vehicle control.
+Unlike DQN-based approaches with discrete actions, DDPG enables smooth continuous control, making it more suitable for autonomous driving tasks.
 
 ---
 
-# Demo
-
-## Autonomous Driving in CARLA
+# Simulation Demo
 
 <p align="center">
-  <img src="assets/demo.gif" width="850"/>
+  <img src="assets/demo.gif" width="900"/>
 </p>
 
 ---
 
-# Key Features
+# Features
 
 - End-to-end autonomous driving in CARLA
 - Deep Reinforcement Learning using DDPG
-- Multi-modal sensor fusion
-- Continuous action control
+- Continuous steering and acceleration control
 - Dynamic traffic simulation
 - Randomized weather environments
+- Multi-modal sensor fusion
 - A* route planning
-- Lane invasion monitoring
-- Collision handling system
+- Replay buffer training
+- Collision and lane invasion monitoring
 - Zero-shot evaluation in unseen towns
 
 ---
@@ -62,13 +61,13 @@ Unlike DQN-based approaches that rely on discrete actions, EchoDrive uses DDPG t
 
 ## Pipeline
 
-1. CARLA environment generates simulation state
-2. Sensors collect environmental data
-3. State vector is constructed
+1. CARLA generates simulation state
+2. Sensors capture environment data
+3. State representation is constructed
 4. Actor network predicts actions
 5. Vehicle executes steering/throttle
 6. Critic network evaluates action quality
-7. Replay buffer stores transitions
+7. Replay buffer stores experiences
 8. Networks update using DDPG
 
 ---
@@ -101,48 +100,10 @@ State =
 ```
 
 This allows the model to jointly reason about:
-- Vision
-- Obstacles
+- Visual understanding
+- Obstacle detection
 - Vehicle dynamics
 - Route planning
-
----
-
-# Sensor Pipeline
-
-## RGB Camera
-
-- Resolution: `128 × 128`
-- Grayscale conversion
-- Resized to `80 × 80`
-- Normalized to `[0,1]`
-
-<p align="center">
-  <img src="assets/camera_feed.png" width="650"/>
-</p>
-
----
-
-## LiDAR
-
-- Front 180° obstacle scanning
-- Encoded into 32 angular sectors
-- Nearest obstacle distance extraction
-
-<p align="center">
-  <img src="assets/lidar.png" width="650"/>
-</p>
-
----
-
-## IMU + Navigation Features
-
-Includes:
-- Speed
-- Gyroscope data
-- Distance to destination
-- Cross-track error
-- Future waypoint vectors
 
 ---
 
@@ -183,10 +144,9 @@ The reward function encourages:
 - Stable driving behavior
 
 Penalties are applied for:
-
 - Collisions
 - Lane invasions
-- Excessive steering oscillations
+- Steering oscillations
 
 ---
 
@@ -229,7 +189,7 @@ pip install -r requirements.txt
 
 # Installing CARLA
 
-Download CARLA 0.9.x:
+Download CARLA 0.9.x from:
 
 - https://carla.org/
 - https://github.com/carla-simulator/carla/releases
@@ -301,41 +261,49 @@ CARLA-Self-Driving-DDPG/
 
 ---
 
-# Training Performance
+# Training Results
 
-## Reward Curve
+## Total Reward Curve
 
 <p align="center">
-  <img src="assets/reward_curve.png" width="750"/>
+  <img src="assets/reward_curve.png" width="800"/>
 </p>
 
-The reward trend demonstrates stable convergence and progressive learning over training episodes.
+The reward trend demonstrates stable convergence and progressive policy learning over training episodes.
 
 ---
 
 ## Collision Reduction
 
 <p align="center">
-  <img src="assets/collision_graph.png" width="750"/>
+  <img src="assets/collision_graph.png" width="800"/>
 </p>
 
-Collision frequency consistently decreased as training progressed.
+Collision frequency consistently decreased as the agent learned safer driving policies.
 
 ---
 
-## Lane Invasion Reduction
+## Actor Loss
 
 <p align="center">
-  <img src="assets/lane_invasion_graph.png" width="750"/>
+  <img src="assets/actor_loss.png" width="800"/>
 </p>
 
-The agent learned stable lane-following behavior with reduced lane deviations.
+The Actor network gradually learned stable continuous action prediction for steering and throttle control.
 
 ---
 
-# Results
+## Critic Loss
 
-## Quantitative Results
+<p align="center">
+  <img src="assets/critic_loss.png" width="800"/>
+</p>
+
+Critic loss stabilized during training, indicating improved Q-value estimation and policy stability.
+
+---
+
+# Quantitative Results
 
 | Metric | Result |
 |---|---|
@@ -348,16 +316,16 @@ The agent learned stable lane-following behavior with reduced lane deviations.
 
 ---
 
-## Generalization Testing
+# Generalization Testing
 
 The trained model was evaluated in:
 - Unseen CARLA towns
-- Dynamic traffic environments
 - Randomized weather conditions
+- Dynamic traffic environments
 
 The agent successfully demonstrated:
 - Robust lane following
-- Smooth steering
+- Smooth steering control
 - Adaptive obstacle avoidance
 - Zero-shot generalization
 
@@ -398,7 +366,7 @@ Planned future work includes:
 3. TensorFlow Documentation  
    https://www.tensorflow.org/
 
-4. Research papers on RL for Autonomous Driving
+4. Research papers on Reinforcement Learning for Autonomous Driving
 
 ---
 
